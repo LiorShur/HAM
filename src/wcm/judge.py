@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
 import anthropic
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from wcm.config import get_settings
 
@@ -163,29 +163,45 @@ class ClaudeJudge:
         claims: list[ClaimInput],
     ) -> JudgeResult:
         model = self.settings.wcm_judge_model
-        response = self.client.beta.messages.parse(
-            model=model,
-            max_tokens=self.settings.wcm_judge_max_tokens,
-            system=SYSTEM_PROMPT,
-            messages=[
-                {
-                    "role": "user",
-                    "content": build_user_message(
-                        citation_text=citation_text,
-                        source_title=source_title,
-                        source_url=source_url,
-                        source_text=source_text,
-                        claims=claims,
-                    ),
-                }
-            ],
-            output_config={"effort": self.settings.wcm_judge_effort},
-            output_format=JudgeOutput,
-            # If a safety classifier declines, retry server-side on Anthropic's
-            # recommended fallback model instead of failing the claim.
-            betas=["server-side-fallback-2026-07-01"],
-            fallbacks="default",
-        )
+        try:
+            # Streamed because a long source plus thinking can take longer than the
+            # SDK allows for a single non-streaming request.
+            with self.client.beta.messages.stream(
+                model=model,
+                max_tokens=self.settings.wcm_judge_max_tokens,
+                system=SYSTEM_PROMPT,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": build_user_message(
+                            citation_text=citation_text,
+                            source_title=source_title,
+                            source_url=source_url,
+                            source_text=source_text,
+                            claims=claims,
+                        ),
+                    }
+                ],
+                output_config={"effort": self.settings.wcm_judge_effort},
+                output_format=JudgeOutput,
+                # If a safety classifier declines, retry server-side on Anthropic's
+                # recommended fallback model instead of failing the claim.
+                betas=["server-side-fallback-2026-07-01"],
+                fallbacks="default",
+            ) as stream:
+                response = stream.get_final_message()
+        except (
+            anthropic.AuthenticationError,
+            anthropic.PermissionDeniedError,
+            anthropic.NotFoundError,
+        ):
+            # Configuration problems (bad key, unknown model): stop the whole run.
+            raise
+        except anthropic.APIError as exc:
+            # Rate limits, overload, timeouts, bad requests: fail this source only.
+            raise JudgeError(f"API error: {exc}") from exc
+        except (ValidationError, ValueError) as exc:
+            raise JudgeError(f"Could not parse the model's output: {exc}") from exc
 
         if response.stop_reason == "refusal":
             category = response.stop_details.category if response.stop_details else None

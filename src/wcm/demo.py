@@ -42,8 +42,15 @@ class _Fetcher:
         text = PAGES.get(("archive:" if via_archive else "") + url)
         if text is None:
             return FetchResult(url, "http_error", http_status=404, via_archive=via_archive)
-        return FetchResult(url, "ok", text=text, final_url=url, via_archive=via_archive,
-                           http_status=200, title="Demo source")
+        return FetchResult(
+            url,
+            "ok",
+            text=text,
+            final_url=url,
+            via_archive=via_archive,
+            http_status=200,
+            title="Demo source",
+        )
 
     def find_archive(self, url, near):
         return None
@@ -51,10 +58,13 @@ class _Fetcher:
 
 def _j(cid, verdict, supporting=(), contradicting=(), parts=(), explanation="", conf=0.85):
     return ClaimJudgement(
-        claim_id=cid, verdict=verdict,
+        claim_id=cid,
+        verdict=verdict,
         supporting_quotes=[Quote(text=t, translation="") for t in supporting],
         contradicting_quotes=[Quote(text=t, translation="") for t in contradicting],
-        unsupported_parts=list(parts), explanation=explanation, confidence=conf,
+        unsupported_parts=list(parts),
+        explanation=explanation,
+        confidence=conf,
     )
 
 
@@ -63,23 +73,33 @@ class _Judge:
         out = {}
         for c in claims:
             if c.text.startswith("It was completed"):
-                out[c.claim_id] = _j(c.claim_id, "supported",
-                                     supporting=["completed in 1871 and first lit that May"],
-                                     explanation="The source gives the same year and month.")
+                out[c.claim_id] = _j(
+                    c.claim_id,
+                    "supported",
+                    supporting=["completed in 1871 and first lit that May"],
+                    explanation="The source gives the same year and month.",
+                )
             elif c.text.startswith("The light was automated"):
                 out[c.claim_id] = _j(
-                    c.claim_id, "contradicted", contradicting=["automated in 1972"],
+                    c.claim_id,
+                    "contradicted",
+                    contradicting=["automated in 1972"],
                     parts=["automated in 1965", "keeper's house became a museum"],
                     explanation="The source dates automation to 1972, not 1965, and does not "
-                    "mention the museum.", conf=0.9)
+                    "mention the museum.",
+                    conf=0.9,
+                )
             else:
                 out[c.claim_id] = _j(
-                    c.claim_id, "partially_supported",
+                    c.claim_id,
+                    "partially_supported",
                     supporting=["Its engineer, Alfred Smith, drew up plans for the tower"],
                     contradicting=["the lantern room was ordered from a Paris workshop"],
                     parts=["designed the lantern room"],
                     explanation="The source names Smith as the engineer who planned the tower, "
-                    "but says the lantern room was ordered from Paris.", conf=0.7)
+                    "but says the lantern room was ordered from Paris.",
+                    conf=0.7,
+                )
         return JudgeResult(judgements=out, model="demo", served_model="demo (canned)")
 
 
