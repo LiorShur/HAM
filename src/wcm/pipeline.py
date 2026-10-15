@@ -4,11 +4,19 @@ import hashlib
 import logging
 from collections import Counter
 
-from sqlalchemy import select
+import anthropic
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from wcm.config import get_settings
-from wcm.judge import PROMPT_VERSION, ClaimInput, ClaimJudgement, Judge, JudgeError
+from wcm.judge import (
+    PROMPT_VERSION,
+    ClaimInput,
+    ClaimJudgement,
+    Judge,
+    JudgeConfigError,
+    JudgeError,
+)
 from wcm.models import (
     AnalysisRun,
     Article,
@@ -34,6 +42,14 @@ from wcm.sources import (
 from wcm.wikipedia import WikipediaClient
 
 log = logging.getLogger(__name__)
+
+# Errors that will repeat for every source, so the run stops instead of going on.
+FATAL_ERRORS = (
+    JudgeConfigError,
+    anthropic.AuthenticationError,
+    anthropic.PermissionDeniedError,
+    anthropic.NotFoundError,
+)
 
 NEGATIVE = {
     Verdict.not_supported,
@@ -143,9 +159,17 @@ def check_quotes(j: ClaimJudgement, source_text: str, context: int) -> tuple[lis
 
 class Analyzer:
     def __init__(
-        self, session: Session, wiki: WikipediaClient, fetcher: SourceFetcher, judge: Judge
+        self,
+        session: Session,
+        wiki: WikipediaClient,
+        fetcher: SourceFetcher,
+        judge: Judge,
+        recheck: bool = False,
     ):
         self.session = session
+        # False: skip citations whose claims were all judged before with the current
+        # prompt version (saves API cost when re-running the same revision).
+        self.recheck = recheck
         self.wiki = wiki
         self.fetcher = fetcher
         self.judge = judge
@@ -344,10 +368,22 @@ class Analyzer:
             is not None
         )
 
+    def _already_checked(self, citation: Citation) -> bool:
+        claim_ids = {c.id for c in citation.claims}
+        if not claim_ids:
+            return False
+        judged = self.session.scalar(
+            select(func.count(func.distinct(Verification.claim_id))).where(
+                Verification.citation_id == citation.id,
+                Verification.prompt_version == PROMPT_VERSION,
+            )
+        )
+        return judged >= len(claim_ids)
+
     def run(self, run: AnalysisRun) -> None:
         run.status = RunStatus.running
         run.started_at = utcnow()
-        self.session.flush()
+        self.session.commit()
         stats: Counter = Counter()
         try:
             revision = get_or_create_revision(
@@ -357,14 +393,40 @@ class Analyzer:
             run.title = revision.article.title
             stats["claims"] = len(revision.claims)
             stats["citations"] = len(revision.citations)
-            for citation in revision.citations:
-                self.check_citation(run, citation, stats)
+            self._save_progress(run, stats)
+
+            # Each citation is its own unit of work, committed when done. A failure
+            # (a broken PDF, an unexpected response) rolls back that citation only.
+            for citation_id in [c.id for c in revision.citations]:
+                citation = self.session.get(Citation, citation_id)
+                if not self.recheck and self._already_checked(citation):
+                    stats["skipped_already_checked"] += 1
+                    continue
+                before = stats.copy()
+                try:
+                    self.check_citation(run, citation, stats)
+                    self._save_progress(run, stats)
+                except FATAL_ERRORS:
+                    raise
+                except Exception as exc:
+                    log.exception("Citation %s failed; continuing", citation_id)
+                    self.session.rollback()
+                    self._snapshots.clear()
+                    stats.clear()
+                    stats.update(before)
+                    stats["citation_errors"] += 1
+                    run.error = f"Last citation error: {type(exc).__name__}: {exc}"
+                    self._save_progress(run, stats)
             run.status = RunStatus.done
         except Exception as exc:
             log.exception("Run %s failed", run.id)
+            self.session.rollback()
             run.status = RunStatus.failed
             run.error = f"{type(exc).__name__}: {exc}"
         finally:
             run.finished_at = utcnow()
-            run.stats = {**(run.stats or {}), **dict(stats)}
-            self.session.flush()
+            self._save_progress(run, stats)
+
+    def _save_progress(self, run: AnalysisRun, stats: Counter) -> None:
+        run.stats = {k: v for k, v in (run.stats or {}).items() if k == "last_error"} | dict(stats)
+        self.session.commit()

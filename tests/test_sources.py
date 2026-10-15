@@ -88,3 +88,18 @@ def test_find_archive():
         )
     )
     assert SourceFetcher(min_interval=0).find_archive("https://x.org", None).endswith("x.org")
+
+
+def test_corrupt_pdf_yields_no_text_instead_of_raising():
+    from wcm.sources import _pdf_text
+
+    assert _pdf_text(b"%PDF-1.4 garbage that is not a real pdf") == ("", None)
+    # Valid header and xref but a broken /Pages tree: the case seen in practice,
+    # where the error only appears when the pages are counted.
+    broken = (
+        b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n"
+        b"2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n"
+        b"3 0 obj 42 endobj\n"
+        b"trailer<</Root 1 0 R>>\n%%EOF"
+    )
+    assert _pdf_text(broken)[0] == ""

@@ -171,18 +171,23 @@ def _html_text(html: str) -> tuple[str, str | None]:
 
 
 def _pdf_text(data: bytes) -> tuple[str, str | None]:
-    # Malformed PDFs raise a wide range of exceptions from deep inside pypdf.
+    # Malformed PDFs raise a wide range of exceptions from deep inside pypdf, at
+    # open time, when counting pages, or per page. Treat any of them as "no text".
     try:
         reader = PdfReader(io.BytesIO(data))
+        page_list = list(reader.pages)
     except Exception:  # noqa: BLE001
         return "", None
     pages = []
-    for i, page in enumerate(reader.pages, start=1):
+    for i, page in enumerate(page_list, start=1):
         try:
             pages.append(f"[page {i}]\n{page.extract_text() or ''}")
         except Exception:  # noqa: BLE001
             pages.append(f"[page {i}]\n")
-    title = reader.metadata.title if reader.metadata else None
+    try:
+        title = reader.metadata.title if reader.metadata else None
+    except Exception:  # noqa: BLE001
+        title = None
     return "\n\n".join(pages), title
 
 

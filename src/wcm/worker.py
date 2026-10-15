@@ -64,12 +64,14 @@ def process(
     judge: Judge | None = None,
     wiki: WikipediaClient | None = None,
     fetcher: SourceFetcher | None = None,
+    recheck: bool = False,
 ) -> None:
     Analyzer(
         session,
         wiki or WikipediaClient(lang=run.lang),
         fetcher or SourceFetcher(),
         judge or ClaudeJudge(),
+        recheck=recheck,
     ).run(run)
 
 
@@ -90,6 +92,13 @@ def work_once(judge: Judge | None = None) -> bool:
 
 def work_forever(poll_seconds: float = 5.0, judge: Judge | None = None) -> None:
     judge = judge or ClaudeJudge()
+    log.info("Worker started; polling every %ss for queued runs", poll_seconds)
     while True:
-        if not work_once(judge):
+        try:
+            busy = work_once(judge)
+        except Exception:
+            # e.g. the database was briefly unavailable; keep the worker alive.
+            log.exception("Worker error; retrying in %ss", poll_seconds)
+            busy = False
+        if not busy:
             time.sleep(poll_seconds)

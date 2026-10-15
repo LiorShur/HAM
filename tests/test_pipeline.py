@@ -33,11 +33,11 @@ def rule(claim, source):
     raise AssertionError(f"unexpected claim {claim.text}")
 
 
-def run_pipeline(session, fetcher=None, judge=None):
+def run_pipeline(session, fetcher=None, judge=None, recheck=False):
     fetcher = fetcher or FakeFetcher(PAGES)
     judge = judge or FakeJudge(rule)
     run = enqueue(session, "Harbor Point Lighthouse")
-    Analyzer(session, FakeWiki(), fetcher, judge).run(run)
+    Analyzer(session, FakeWiki(), fetcher, judge, recheck=recheck).run(run)
     session.commit()
     return run, fetcher, judge
 
@@ -73,12 +73,70 @@ def test_negative_verdict_rechecked_against_archive(session):
     ]
 
 
-def test_no_duplicate_findings_on_rerun(session):
+def test_rerun_skips_judged_citations_and_retries_unavailable_ones(session):
     run_pipeline(session)
-    run2, _, _ = run_pipeline(session)
+    run2, _, judge2 = run_pipeline(session)
+    # The 2 judged citations are skipped (no API cost); the 2 unavailable ones
+    # (book without URL, dead PDF) are tried again.
+    assert run2.stats["skipped_already_checked"] == 2
+    assert judge2.calls == []
+    assert run2.stats.get("findings", 0) == 0
+    assert len(session.scalars(select(Finding)).all()) == 1
+    assert len(session.scalars(select(Verification)).all()) == 5 + 2
+
+
+def test_recheck_judges_everything_again_without_duplicate_findings(session):
+    run_pipeline(session)
+    run2, _, judge2 = run_pipeline(session, recheck=True)
+    assert "skipped_already_checked" not in run2.stats
+    assert judge2.calls
     assert run2.stats.get("findings", 0) == 0
     assert len(session.scalars(select(Finding)).all()) == 1
     assert len(session.scalars(select(Verification)).all()) == 2 * 5
+
+
+class ExplodingFetcher(FakeFetcher):
+    """Raises an unexpected error for one URL, like a corrupt PDF did in practice."""
+
+    def __init__(self, pages, bad_url, exc):
+        super().__init__(pages)
+        self.bad_url, self.exc = bad_url, exc
+
+    def fetch(self, url, via_archive=False):
+        if url == self.bad_url:
+            raise self.exc
+        return super().fetch(url, via_archive)
+
+
+def test_one_broken_source_does_not_abort_the_run(session):
+    fetcher = ExplodingFetcher(PAGES, NEWS, RuntimeError("Invalid object in /Pages"))
+    run, _, _ = run_pipeline(session, fetcher=fetcher)
+    assert run.status == "done"
+    assert run.stats["citation_errors"] == 1
+    assert "Invalid object in /Pages" in run.error
+    # Everything else was still checked and saved.
+    assert run.stats["findings"] == 1
+    assert run.stats["verdict:source_unavailable"] == 2
+    assert len(session.scalars(select(Verification)).all()) == 4
+
+
+def test_auth_errors_still_stop_the_run(session):
+    import anthropic
+    import httpx2
+
+    err = anthropic.AuthenticationError(
+        "invalid x-api-key",
+        response=httpx2.Response(401, request=httpx2.Request("POST", "https://x")),
+        body=None,
+    )
+
+    class BadKeyJudge(FakeJudge):
+        def judge(self, **kw):
+            raise err
+
+    run, _, _ = run_pipeline(session, judge=BadKeyJudge(rule))
+    assert run.status == "failed"
+    assert "AuthenticationError" in run.error
 
 
 def test_live_page_changed_archive_supports(session):

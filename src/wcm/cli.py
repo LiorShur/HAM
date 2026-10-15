@@ -29,9 +29,13 @@ def scan(
     title: str = typer.Argument(None, help="Article title"),
     rev: int = typer.Option(None, help="Exact revision id"),
     lang: str = typer.Option("en"),
+    recheck: bool = typer.Option(
+        False, help="Judge every citation again, even ones already checked for this revision"
+    ),
 ) -> None:
     """Analyse one article now, in this process."""
     from wcm.judge import ClaudeJudge
+    from wcm.models import RunStatus
     from wcm.worker import enqueue, process
 
     if not title and rev is None:
@@ -39,12 +43,16 @@ def scan(
     judge = _make_judge(ClaudeJudge)
     with session_scope() as session:
         run = enqueue(session, title, rev, lang, requested_by="cli")
+        # Mark it as taken before committing, so a running `wcm worker` doesn't
+        # pick up the same run.
+        run.status = RunStatus.running
         session.commit()
-        process(session, run, judge=judge)
+        process(session, run, judge=judge, recheck=recheck)
         typer.echo(f"Run {run.id}: {run.status}")
         typer.echo(json.dumps(run.stats, indent=2))
         if run.error:
             typer.echo(run.error, err=True)
+        if run.status == RunStatus.failed:
             raise typer.Exit(1)
 
 

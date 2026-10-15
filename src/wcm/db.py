@@ -12,7 +12,13 @@ from wcm.config import get_settings
 @lru_cache
 def get_engine(url: str | None = None) -> Engine:
     url = url or get_settings().database_url
-    kwargs = {"connect_args": {"check_same_thread": False}} if url.startswith("sqlite") else {}
+    kwargs = (
+        # timeout: wait up to 30s for another process's write to finish instead of
+        # failing with "database is locked".
+        {"connect_args": {"check_same_thread": False, "timeout": 30}}
+        if url.startswith("sqlite")
+        else {}
+    )
     return create_engine(url, future=True, **kwargs)
 
 
