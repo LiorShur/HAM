@@ -6,6 +6,7 @@ against the source text (see pipeline.py); a quote that isn't there invalidates
 the verdict.
 """
 
+import os
 from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
@@ -109,6 +110,10 @@ class JudgeError(RuntimeError):
     pass
 
 
+class JudgeConfigError(RuntimeError):
+    """Setup problem (e.g. no API key). Stops the run instead of failing one source."""
+
+
 class Judge(Protocol):
     def judge(
         self,
@@ -151,7 +156,15 @@ def build_user_message(
 class ClaudeJudge:
     def __init__(self, client: anthropic.Anthropic | None = None):
         self.settings = get_settings()
-        self.client = client or anthropic.Anthropic()
+        if client is None:
+            key = self.settings.anthropic_api_key or None
+            if not key and not os.environ.get("ANTHROPIC_AUTH_TOKEN"):
+                raise JudgeConfigError(
+                    "No Anthropic API key found. Add ANTHROPIC_API_KEY=sk-ant-... to the .env "
+                    "file in the folder you run wcm from, or set it as an environment variable."
+                )
+            client = anthropic.Anthropic(api_key=key)
+        self.client = client
 
     def judge(
         self,

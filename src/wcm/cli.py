@@ -31,14 +31,16 @@ def scan(
     lang: str = typer.Option("en"),
 ) -> None:
     """Analyse one article now, in this process."""
+    from wcm.judge import ClaudeJudge
     from wcm.worker import enqueue, process
 
     if not title and rev is None:
         raise typer.BadParameter("Give a title or --rev")
+    judge = _make_judge(ClaudeJudge)
     with session_scope() as session:
         run = enqueue(session, title, rev, lang, requested_by="cli")
         session.commit()
-        process(session, run)
+        process(session, run, judge=judge)
         typer.echo(f"Run {run.id}: {run.status}")
         typer.echo(json.dumps(run.stats, indent=2))
         if run.error:
@@ -56,12 +58,23 @@ def demo_seed() -> None:
     typer.echo(f"Seeded demo run {run_id}. Start the server and open the review queue.")
 
 
+def _make_judge(factory):
+    from wcm.judge import JudgeConfigError
+
+    try:
+        return factory()
+    except JudgeConfigError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(2) from exc
+
+
 @app.command()
 def worker(poll: float = typer.Option(5.0, help="Seconds between queue polls")) -> None:
     """Process queued runs forever."""
+    from wcm.judge import ClaudeJudge
     from wcm.worker import work_forever
 
-    work_forever(poll)
+    work_forever(poll, judge=_make_judge(ClaudeJudge))
 
 
 @app.command()
@@ -79,8 +92,9 @@ def run_eval(
 ) -> None:
     """Score the judge against a labelled gold set. Calls the Claude API (costs money)."""
     from wcm.evaluation import run as run_gold
+    from wcm.judge import ClaudeJudge
 
-    report = run_gold(path, limit=limit)
+    report = run_gold(path, judge=_make_judge(ClaudeJudge), limit=limit)
     typer.echo(json.dumps(report, indent=2))
 
 

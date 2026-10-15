@@ -88,8 +88,8 @@ def work_once(judge: Judge | None = None) -> bool:
     return True
 
 
-def work_forever(poll_seconds: float = 5.0) -> None:
-    judge = ClaudeJudge()
+def work_forever(poll_seconds: float = 5.0, judge: Judge | None = None) -> None:
+    judge = judge or ClaudeJudge()
     while True:
         if not work_once(judge):
             time.sleep(poll_seconds)

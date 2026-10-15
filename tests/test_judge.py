@@ -215,3 +215,56 @@ def test_unparseable_output_is_a_judge_error():
 
     with pytest.raises(JudgeError, match="parse"):
         call(ClaudeJudge(client=real_client(handler)))
+
+
+# --- API key handling -------------------------------------------------------------
+
+
+def test_api_key_is_read_from_dotenv(tmp_path, monkeypatch):
+    """Regression: a key in .env must reach the SDK, which only reads os.environ."""
+    from wcm.config import get_settings
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("ANTHROPIC_API_KEY=sk-ant-from-dotenv\n")
+    get_settings.cache_clear()
+    assert ClaudeJudge().client.api_key == "sk-ant-from-dotenv"
+
+
+def test_missing_api_key_gives_a_clear_error(tmp_path, monkeypatch):
+    from wcm.config import get_settings
+    from wcm.judge import JudgeConfigError
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    monkeypatch.chdir(tmp_path)
+    get_settings.cache_clear()
+    with pytest.raises(JudgeConfigError, match="ANTHROPIC_API_KEY"):
+        ClaudeJudge()
+
+
+def test_scan_without_key_exits_cleanly_and_creates_no_run(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    from wcm.cli import app
+    from wcm.config import get_settings
+    from wcm.db import get_engine
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'x.db'}")
+    get_settings.cache_clear()
+    get_engine.cache_clear()
+    runner = CliRunner()
+    assert runner.invoke(app, ["init-db"]).exit_code == 0
+    result = runner.invoke(app, ["scan", "Some Article"])
+    assert result.exit_code == 2
+    assert "No Anthropic API key found" in result.output
+    import sqlite3
+
+    assert sqlite3.connect(tmp_path / "x.db").execute(
+        "select count(*) from analysis_runs"
+    ).fetchone() == (0,)
+    get_engine.cache_clear()

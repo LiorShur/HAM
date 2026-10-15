@@ -15,6 +15,9 @@ class Settings(BaseSettings):
 
     # Claude settings. The judge decides whether a source supports a claim, so it
     # runs on the most capable model at high effort; precision matters more than cost.
+    # Read from .env here and handed to the Anthropic client explicitly; the SDK
+    # itself only looks at the process environment.
+    anthropic_api_key: str | None = None
     wcm_judge_model: str = "claude-opus-5-5"
     wcm_judge_effort: str = "high"
     wcm_judge_max_tokens: int = 32000
