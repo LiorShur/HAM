@@ -268,3 +268,43 @@ def test_scan_without_key_exits_cleanly_and_creates_no_run(tmp_path, monkeypatch
         "select count(*) from analysis_runs"
     ).fetchone() == (0,)
     get_engine.cache_clear()
+
+
+def test_failed_scan_keeps_its_results(tmp_path, monkeypatch):
+    """Regression: a failed scan used to roll back everything it had saved."""
+    import sqlite3
+
+    from conftest import FakeJudge
+    from typer.testing import CliRunner
+
+    from wcm import judge as judge_mod
+    from wcm import worker as worker_mod
+    from wcm.cli import app
+    from wcm.config import get_settings
+    from wcm.db import get_engine
+    from wcm.wikipedia import WikipediaError
+
+    class NoSuchPage:
+        def __init__(self, **kw):
+            self.lang = "en"
+
+        def revision_info(self, title=None, rev_id=None):
+            raise WikipediaError("No such page")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'x.db'}")
+    monkeypatch.setattr(judge_mod, "ClaudeJudge", lambda: FakeJudge(None))
+    monkeypatch.setattr(worker_mod, "WikipediaClient", NoSuchPage)
+    get_settings.cache_clear()
+    get_engine.cache_clear()
+    runner = CliRunner()
+    runner.invoke(app, ["init-db"])
+    result = runner.invoke(app, ["scan", "Missing Article"])
+    assert result.exit_code == 1
+    row = (
+        sqlite3.connect(tmp_path / "x.db")
+        .execute("select status, error from analysis_runs")
+        .fetchone()
+    )
+    assert row[0] == "failed" and "No such page" in row[1]
+    get_engine.cache_clear()

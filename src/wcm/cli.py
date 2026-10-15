@@ -48,12 +48,14 @@ def scan(
         run.status = RunStatus.running
         session.commit()
         process(session, run, judge=judge, recheck=recheck)
-        typer.echo(f"Run {run.id}: {run.status}")
-        typer.echo(json.dumps(run.stats, indent=2))
-        if run.error:
-            typer.echo(run.error, err=True)
-        if run.status == RunStatus.failed:
-            raise typer.Exit(1)
+    # Report after the session has committed: raising Exit inside the `with`
+    # block would roll back the run's results.
+    typer.echo(f"Run {run.id}: {run.status}")
+    typer.echo(json.dumps(run.stats, indent=2))
+    if run.error:
+        typer.echo(run.error, err=True)
+    if run.status == RunStatus.failed:
+        raise typer.Exit(1)
 
 
 @app.command("demo-seed")
