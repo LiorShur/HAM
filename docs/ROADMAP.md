@@ -17,6 +17,9 @@
 - [x] Re-check negative verdicts against an archived copy.
 - [x] Review queue, reviewer decisions, audit trail, talk-page draft for confirmed findings.
 - [x] Eval harness (precision, recall, flag rate per perspective).
+- [x] First real article (Cape Hatteras Lighthouse): most false alarms came from
+      judging each sentence–source pair separately. Now one assessment per claim,
+      sources judged together, offline sources flagged, minor differences marked.
 - [ ] Try on real articles once there's network access to Wikipedia, and tune
       the claim extraction (lists, tables, quotes).
 - [ ] Books: page-level lookup through Internet Archive / Google Books where a

@@ -60,8 +60,9 @@ def _j(cid, verdict, supporting=(), contradicting=(), parts=(), explanation="", 
     return ClaimJudgement(
         claim_id=cid,
         verdict=verdict,
-        supporting_quotes=[Quote(text=t, translation="") for t in supporting],
-        contradicting_quotes=[Quote(text=t, translation="") for t in contradicting],
+        supporting_quotes=[Quote(source_id=1, text=t, translation="") for t in supporting],
+        contradicting_quotes=[Quote(source_id=1, text=t, translation="") for t in contradicting],
+        severity="none" if verdict == "supported" else "major",
         unsupported_parts=list(parts),
         explanation=explanation,
         confidence=conf,
@@ -69,7 +70,7 @@ def _j(cid, verdict, supporting=(), contradicting=(), parts=(), explanation="", 
 
 
 class _Judge:
-    def judge(self, *, citation_text, source_title, source_url, source_text, claims):
+    def judge(self, *, sources, claims):
         out = {}
         for c in claims:
             if c.text.startswith("It was completed"):

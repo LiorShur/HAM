@@ -1,17 +1,25 @@
 import { useCallback, useEffect, useState } from "react";
-import type { Api, FindingDetail, FindingSummary, Quote } from "./api";
+import type { Api, FindingDetail, FindingSummary, Quote, SourceResult } from "./api";
 
 const STATUSES = [
   ["open", "Open"],
   ["needs_research", "Needs research"],
   ["confirmed", "Confirmed"],
   ["dismissed", "Dismissed"],
+  ["superseded", "Superseded"],
 ] as const;
+
+function findingLabel(f: FindingSummary): string {
+  const base = VERDICT_LABEL[f.verdict] ?? f.verdict;
+  if (f.needs_offline_check) return `${base} · check offline source`;
+  if (f.severity === "minor") return `${base} · minor`;
+  return base;
+}
 
 const VERDICT_LABEL: Record<string, string> = {
   supported: "Supported",
   partially_supported: "Partly supported",
-  not_supported: "Not in source",
+  not_supported: "Not in sources",
   contradicted: "Source contradicts",
   source_insufficient: "Source insufficient",
   source_unavailable: "Source unavailable",
@@ -66,7 +74,7 @@ export default function ReviewQueue({ client }: { client: Api }) {
                   <span className="muted">{f.article}</span>
                 </span>
                 <span className="claim-line">{f.claim}</span>
-                <span className="muted small">{VERDICT_LABEL[f.verdict] ?? f.verdict}</span>
+                <span className="muted small">{findingLabel(f)}</span>
               </button>
             </li>
           ))}
@@ -98,12 +106,15 @@ function Highlighted({ excerpt, quote }: { excerpt: string; quote: string }) {
   );
 }
 
-function QuoteBlock({ q }: { q: Quote }) {
+function QuoteBlock({ q, many }: { q: Quote; many: boolean }) {
   const [open, setOpen] = useState(false);
+  const who = many && q.source_number ? `Source ${q.source_number}` : "Source";
   return (
     <div className={`quote ${q.kind}`}>
       <div className="quote-head">
-        <span>{q.kind === "supporting" ? "Source says (supports)" : "Source says (contradicts)"}</span>
+        <span>
+          {who} says ({q.kind === "supporting" ? "supports" : "contradicts"})
+        </span>
         <span className={q.verified ? "badge ok" : "badge bad"}>
           {q.verified ? "found in source" : "NOT found in source"}
         </span>
@@ -123,6 +134,39 @@ function QuoteBlock({ q }: { q: Quote }) {
         </>
       )}
     </div>
+  );
+}
+
+const SOURCE_RESULT: Record<string, string> = {
+  supported: "supports it",
+  partially_supported: "supports part of it",
+  not_supported: "doesn't say this",
+  contradicted: "says something different",
+  source_insufficient: "couldn't read enough to tell",
+  source_unavailable: "couldn't be checked online",
+};
+
+function SourceRow({ src }: { src: SourceResult }) {
+  return (
+    <li>
+      <p className="citation">{src.citation_text}</p>
+      <p className="small">
+        <span className={`verdict v-${src.verdict ?? "none"}`}>
+          {src.verdict ? SOURCE_RESULT[src.verdict] ?? src.verdict : "not checked"}
+        </span>
+        {src.source_url && (
+          <>
+            {" · "}
+            <a href={src.source_url} target="_blank" rel="noreferrer">
+              {src.source_via_archive ? "archived copy checked" : "source checked"}
+            </a>
+          </>
+        )}
+        {src.source_fetched_at && (
+          <span className="muted"> · fetched {new Date(src.source_fetched_at).toLocaleString()}</span>
+        )}
+      </p>
+    </li>
   );
 }
 
@@ -177,31 +221,34 @@ function FindingView({ id, client, onReviewed }: { id: number; client: Api; onRe
       {f.context_before && <p className="context">{f.context_before}</p>}
       <p className="claim">{f.claim}</p>
 
-      <h3>Citation</h3>
-      <p className="citation">{f.citation_text}</p>
-      <p className="small">
-        {f.source_url && (
-          <a href={f.source_url} target="_blank" rel="noreferrer">
-            {f.source_via_archive ? "Archived copy checked" : "Source checked"}
-          </a>
-        )}
-        {f.source_fetched_at && (
-          <span className="muted"> · fetched {new Date(f.source_fetched_at).toLocaleString()}</span>
-        )}
-      </p>
+      <h3>{f.sources.length === 1 ? "Citation" : `Citations (${f.sources.length})`}</h3>
+      <ol className="sources">
+        {f.sources.map((src) => (
+          <SourceRow key={src.citation_id} src={src} />
+        ))}
+      </ol>
 
       <h3>
         Tool's assessment:{" "}
         <span className={`verdict v-${f.verdict}`}>{VERDICT_LABEL[f.verdict] ?? f.verdict}</span>
+        {f.severity === "minor" && <span className="badge"> minor</span>}
       </h3>
+      {f.needs_offline_check && (
+        <p className="notice">
+          The sources that could be read don't cover all of this, but it also cites a source
+          that isn't online. Check that source before treating this as a problem.
+        </p>
+      )}
       <p className="muted small">
+        {f.assessment === "claim" ? "All readable sources judged together. " : ""}
         Model confidence {f.confidence != null ? Math.round(f.confidence * 100) + "%" : "n/a"} ·{" "}
-        {f.served_model ?? f.model} · {f.prompt_version}. Check the source yourself; the model can be wrong.
+        {f.served_model ?? f.model} · {f.prompt_version}. Check the sources yourself; the model can be
+        wrong.
       </p>
       <p>{f.explanation}</p>
       {f.unsupported_parts.length > 0 && (
         <>
-          <p className="small"><strong>Parts not found in the source:</strong></p>
+          <p className="small"><strong>Parts not found in the sources:</strong></p>
           <ul className="parts">
             {f.unsupported_parts.map((p, i) => (
               <li key={i}>{p}</li>
@@ -210,7 +257,7 @@ function FindingView({ id, client, onReviewed }: { id: number; client: Api; onRe
         </>
       )}
       {f.quotes.map((q, i) => (
-        <QuoteBlock key={i} q={q} />
+        <QuoteBlock key={i} q={q} many={f.sources.length > 1} />
       ))}
 
       <h3>Your decision</h3>
@@ -222,7 +269,7 @@ function FindingView({ id, client, onReviewed }: { id: number; client: Api; onRe
       />
       <div className="actions">
         <button disabled={busy} className="primary" onClick={() => decide("confirmed")}>
-          Confirm: source doesn't support it
+          Confirm: not supported by its sources
         </button>
         <button disabled={busy} onClick={() => decide("needs_research")}>
           Needs more research

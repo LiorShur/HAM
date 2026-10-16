@@ -13,7 +13,7 @@ import json
 from collections import Counter, defaultdict
 from pathlib import Path
 
-from wcm.judge import ClaimInput, ClaudeJudge, Judge, JudgeError
+from wcm.judge import ClaimInput, ClaudeJudge, Judge, JudgeError, SourceInput
 from wcm.pipeline import FINDING_VERDICTS, check_quotes
 
 
@@ -31,10 +31,14 @@ def run(path: str | Path, judge: Judge | None = None, limit: int | None = None) 
     for i, case in enumerate(cases):
         try:
             result = judge.judge(
-                citation_text=case.get("citation_text", ""),
-                source_title=None,
-                source_url=case.get("source_url", ""),
-                source_text=case["source_text"],
+                sources=[
+                    SourceInput(
+                        source_id=1,
+                        citation_text=case.get("citation_text", ""),
+                        url=case.get("source_url", ""),
+                        text=case["source_text"],
+                    )
+                ],
                 claims=[ClaimInput(i, case["claim"], case.get("context_before", ""))],
             )
         except JudgeError as exc:
@@ -42,7 +46,7 @@ def run(path: str | Path, judge: Judge | None = None, limit: int | None = None) 
             rows.append({"id": case.get("id"), "error": str(exc)})
             continue
         j = result.judgements[i]
-        _, quotes_ok = check_quotes(j, case["source_text"], 0)
+        _, quotes_ok = check_quotes(j, {1: (None, case["source_text"])}, 0)
         bad_quotes += not quotes_ok
         flagged = quotes_ok and j.verdict in FINDING_VERDICTS
         should_flag = case["expected"] in FINDING_VERDICTS

@@ -21,6 +21,7 @@ from sqlalchemy import (
     Table,
     Text,
     UniqueConstraint,
+    false,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -57,6 +58,9 @@ class FindingStatus(StrEnum):
     confirmed = "confirmed"
     dismissed = "dismissed"
     needs_research = "needs_research"
+    # Replaced by a newer assessment of the same claim (e.g. after a prompt change)
+    # before anyone confirmed or dismissed it.
+    superseded = "superseded"
 
 
 class ReviewDecision(StrEnum):
@@ -177,20 +181,26 @@ class AnalysisRun(Base):
 
 
 class Verification(Base):
-    """One judgement: does this citation's source support this claim?"""
+    """One judgement. kind="source": does this one citation's source support the
+    claim? kind="claim": do all of the claim's sources, taken together, support it?
+    (citation_id and snapshot_id are empty for kind="claim"; each quote records the
+    citation it came from.)"""
 
     __tablename__ = "verifications"
 
     id: Mapped[int] = mapped_column(primary_key=True)
     run_id: Mapped[int] = mapped_column(ForeignKey("analysis_runs.id"))
     claim_id: Mapped[int] = mapped_column(ForeignKey("claims.id"))
-    citation_id: Mapped[int] = mapped_column(ForeignKey("citations.id"))
+    kind: Mapped[str] = mapped_column(String(16), default="source", server_default="source")
+    citation_id: Mapped[int | None] = mapped_column(ForeignKey("citations.id"))
     snapshot_id: Mapped[int | None] = mapped_column(ForeignKey("source_snapshots.id"))
     verdict: Mapped[str] = mapped_column(String(32))
     explanation: Mapped[str] = mapped_column(Text, default="")
+    # none | minor | major
+    severity: Mapped[str | None] = mapped_column(String(8))
     unsupported_parts: Mapped[list[str]] = mapped_column(JSON, default=list)
-    # [{"kind": "supporting"|"contradicting", "text": ..., "translation": ...,
-    #   "verified": bool, "excerpt": ...}]
+    # [{"kind": "supporting"|"contradicting", "citation_id": int, "text": ...,
+    #   "translation": ..., "verified": bool, "excerpt": ...}]
     quotes: Mapped[list[dict]] = mapped_column(JSON, default=list)
     # False if the model quoted text that isn't actually in the source.
     quotes_verified: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -203,7 +213,7 @@ class Verification(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     claim: Mapped[Claim] = relationship()
-    citation: Mapped[Citation] = relationship()
+    citation: Mapped[Citation | None] = relationship()
     snapshot: Mapped[SourceSnapshot | None] = relationship()
     run: Mapped[AnalysisRun] = relationship()
 
@@ -214,6 +224,13 @@ class Finding(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     verification_id: Mapped[int] = mapped_column(ForeignKey("verifications.id"), unique=True)
     article_id: Mapped[int] = mapped_column(ForeignKey("articles.id"))
+    # At most one live finding per claim.
+    claim_id: Mapped[int | None] = mapped_column(ForeignKey("claims.id"))
+    # The readable sources don't support the claim, but it also cites sources that
+    # couldn't be checked online (books, dead links), which may cover the rest.
+    needs_offline_check: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=false()
+    )
     # F2 = citation mismatch. Later phases add F1, F3, F4, F5.
     category: Mapped[str] = mapped_column(String(8), default="F2")
     priority: Mapped[str] = mapped_column(String(8))
@@ -225,6 +242,7 @@ class Finding(Base):
 
     verification: Mapped[Verification] = relationship()
     article: Mapped[Article] = relationship()
+    claim: Mapped[Claim | None] = relationship()
     reviews: Mapped[list["Review"]] = relationship(
         back_populates="finding", order_by="Review.created_at"
     )

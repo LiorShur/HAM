@@ -159,3 +159,9 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
   .queue { grid-template-columns: 1fr; }
   .list { border-right: none; border-bottom: 1px solid var(--border); max-height: 45vh; }
 }
+
+.sources { padding-left: 1.2rem; margin: 0; }
+.sources li { margin-bottom: 0.6rem; }
+.sources .citation { margin-bottom: 0.15rem; }
+.notice { background: var(--warn-bg); color: var(--warn); border-radius: 6px; padding: 0.5rem 0.7rem; font-size: 0.9rem; }
+.v-source_unavailable, .v-source_insufficient, .v-none { background: var(--bg); color: var(--muted); }

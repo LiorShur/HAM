@@ -13,7 +13,7 @@ services:
 
   migrate:
     build: .
-    command: alembic upgrade head
+    command: wcm init-db
     env_file: .env
     environment:
       DATABASE_URL: postgresql+psycopg://wcm:wcm@db:5432/wcm

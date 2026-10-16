@@ -19,14 +19,19 @@ article title or revision id
     each linked to its citations                      (wcm/parsing.py)
   → fetch each cited source: live URL, else the
     archive link, else the Wayback Machine            (wcm/sources.py)
-  → Claude judges every claim against its source
-    and must quote the passages it relies on          (wcm/judge.py)
+  → stage 1, per source: Claude judges every claim
+    that cites it and must quote the passages it
+    relies on                                         (wcm/judge.py)
   → quotes are checked by string matching; a verdict
     with a made-up quote is thrown out                (wcm/pipeline.py)
   → a negative verdict on a live page is re-checked
     against an archived copy (the page may have
     changed since it was cited)
-  → findings go to the review queue                   (wcm/api.py, web/)
+  → stage 2, per claim: if any source supports it,
+    it's fine; if several sources each cover part,
+    Claude judges them together
+  → at most one finding per claim goes to the
+    review queue                                      (wcm/api.py, web/)
   → a confirmed finding gets a talk-page draft that
     the reviewer rewrites in their own words          (wcm/reports.py)
 ```
@@ -34,8 +39,20 @@ article title or revision id
 Verdicts: `supported`, `partially_supported`, `not_supported`, `contradicted`,
 `source_insufficient` (paywall, abstract only, wrong page), and
 `source_unavailable` (no URL, or fetch failed). Only the first four come from the
-model. Findings are created for `partially_supported`, `not_supported` and
-`contradicted`, and only when every quote was found in the source.
+model. A claim gets a finding when its sources, taken together, only partly
+support it, don't support it, or contradict it, and only when every quote was
+found in the source. Findings are marked:
+
+- **minor** (low priority) when the difference wouldn't change what a reader
+  understands, e.g. 198 vs 200 feet. Disputed or central facts (casualty figures,
+  whether an event took place, who was responsible) are never minor.
+- **check offline source** (low priority) when the readable sources don't cover
+  everything but the claim also cites a source that can't be read online, such as
+  a book.
+
+When the prompt changes (`PROMPT_VERSION` in `wcm/judge.py`), re-running an
+article re-judges it, and any finding nobody has decided on yet is marked
+*superseded* by the new assessment. Confirmed and dismissed findings are kept.
 
 Everything is stored for audit: revision id, the citation as written, source URL,
 fetch time and content hash, model, served model, prompt version, the request id,
@@ -66,7 +83,7 @@ pip install -e ".[dev]"
 cp .env.example .env            # set ANTHROPIC_API_KEY, WCM_CONTACT, WCM_REVIEWER_TOKENS
 (cd web && npm ci && npm run build)
 
-wcm init-db                     # SQLite by default (DATABASE_URL in .env)
+wcm init-db                     # creates or upgrades the database; run after every git pull
 wcm demo-seed                   # optional: synthetic article, no API key needed
 wcm serve                       # http://127.0.0.1:8000, sign in with a reviewer token
 wcm worker                      # in another terminal: processes queued checks

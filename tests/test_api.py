@@ -49,7 +49,11 @@ def test_review_flow_and_talk_draft(client, session):
     detail = client.get(f"/api/findings/{fid}", headers=A).json()
     assert detail["verdict"] == "contradicted"
     assert detail["permalink"] == "https://en.wikipedia.org/w/index.php?oldid=1000"
-    assert detail["source_via_archive"] is True
+    assert detail["assessment"] == "source"
+    [src] = detail["sources"]
+    assert src["source_via_archive"] is True
+    assert src["verdict"] == "contradicted"
+    assert detail["quotes"][0]["source_number"] == 1
 
     # No draft until a human confirms.
     assert client.get(f"/api/findings/{fid}/talk-draft", headers=A).status_code == 409
@@ -71,3 +75,42 @@ def test_review_flow_and_talk_draft(client, session):
     assert stats["findings"] == {"confirmed": 1}
     assert stats["reviewer_agreement"] == 1.0
     assert stats["rejected_for_unverified_quotes"] == 1
+
+
+def test_multi_source_finding_detail_and_draft(client, session):
+    from test_claims import run as run_multi
+
+    run_multi(session)
+    session.commit()
+    findings = client.get("/api/findings?status=open", headers=A).json()
+    by_claim = {f["claim"][:20]: f for f in findings}
+    assert set(by_claim) == {
+        "The light was visibl",
+        "The keeper's house w",
+        "Its height is 61 met",
+    }
+    keeper = by_claim["The keeper's house w"]
+    assert keeper["needs_offline_check"] is True and keeper["priority"] == "low"
+    assert by_claim["Its height is 61 met"]["severity"] == "minor"
+
+    fid = by_claim["The light was visibl"]["id"]
+    detail = client.get(f"/api/findings/{fid}", headers=A).json()
+    assert detail["assessment"] == "claim"
+    assert [s["number"] for s in detail["sources"]] == [1, 2]
+    assert {s["verdict"] for s in detail["sources"]} == {"not_supported"}
+
+    client.post(
+        f"/api/findings/{fid}/reviews",
+        headers=A,
+        json={"decision": "confirmed", "note": "Neither source gives a range."},
+    )
+    draft = client.get(f"/api/findings/{fid}/talk-draft", headers=A).text
+    assert "This cites 2 sources:" in draft
+    assert draft.count("does not appear to say this") == 2
+    assert "Neither source gives a range." in draft
+
+    kid = keeper["id"]
+    client.post(f"/api/findings/{kid}/reviews", headers=A, json={"decision": "confirmed"})
+    draft = client.get(f"/api/findings/{kid}/talk-draft", headers=A).text
+    assert "I could not check it online" in draft
+    assert "may cover the rest" in draft

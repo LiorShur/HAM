@@ -12,6 +12,6 @@ COPY src ./src
 COPY alembic ./alembic
 RUN pip install --no-cache-dir .
 COPY --from=web /web/dist ./web/dist
-ENV PYTHONUNBUFFERED=1 WCM_WEB_DIST=/app/web/dist
+ENV PYTHONUNBUFFERED=1 WCM_WEB_DIST=/app/web/dist WCM_ALEMBIC_DIR=/app/alembic
 EXPOSE 8000
 CMD ["wcm", "serve", "--host", "0.0.0.0", "--port", "8000"]

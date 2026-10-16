@@ -16,7 +16,8 @@ PAGES = {
 }
 
 
-def rule(claim, source):
+def rule(claim, sources):
+    source = " ".join(s.text for s in sources)
     if claim.text.startswith("It was completed"):
         return judgement(claim.claim_id, "supported", supporting=["completed in 1871"])
     if claim.text.startswith("The light was automated"):
@@ -60,7 +61,7 @@ def test_full_run(session):
     # The finding rests on the archived copy, not the live page.
     assert v.snapshot.via_archive
     assert v.quotes[0]["verified"] and "automated in 1972" in v.quotes[0]["excerpt"]
-    assert v.prompt_version == "judge-v1"
+    assert v.prompt_version == "judge-v2"
 
 
 def test_negative_verdict_rechecked_against_archive(session):
@@ -112,7 +113,7 @@ def test_one_broken_source_does_not_abort_the_run(session):
     fetcher = ExplodingFetcher(PAGES, NEWS, RuntimeError("Invalid object in /Pages"))
     run, _, _ = run_pipeline(session, fetcher=fetcher)
     assert run.status == "done"
-    assert run.stats["citation_errors"] == 1
+    assert run.stats["unit_errors"] == 1
     assert "Invalid object in /Pages" in run.error
     # Everything else was still checked and saved.
     assert run.stats["findings"] == 1
@@ -143,10 +144,11 @@ def test_live_page_changed_archive_supports(session):
     pages = dict(PAGES)
     pages["archive:" + ARCHIVE] = "Completed in 1871, the light was automated in 1965."
 
-    def r(claim, source):
+    def r(claim, sources):
+        source = " ".join(s.text for s in sources)
         if claim.text.startswith("The light was automated") and "1965" in source:
             return judgement(claim.claim_id, "supported", supporting=["automated in 1965"])
-        return rule(claim, source)
+        return rule(claim, sources)
 
     run, _, _ = run_pipeline(session, FakeFetcher(pages), FakeJudge(r))
     assert run.stats.get("findings", 0) == 0

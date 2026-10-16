@@ -1,4 +1,13 @@
-"""One analysis run: fetch a revision, extract claims, check each citation's source."""
+"""One analysis run: fetch a revision, extract claims, check them against their sources.
+
+Stage 1, per citation: fetch the source once and judge every claim that cites it
+(Verification kind="source"). These are kept for the audit trail.
+
+Stage 2, per claim: combine the results for all of the claim's citations. If any one
+source supports it, it's supported. If several sources each support only part, judge
+them together (kind="claim"), since Wikipedia often cites one source per part of a
+sentence. A claim gets at most one live finding.
+"""
 
 import hashlib
 import logging
@@ -16,6 +25,7 @@ from wcm.judge import (
     Judge,
     JudgeConfigError,
     JudgeError,
+    SourceInput,
 )
 from wcm.models import (
     AnalysisRun,
@@ -23,6 +33,7 @@ from wcm.models import (
     Citation,
     Claim,
     Finding,
+    FindingStatus,
     Revision,
     RunStatus,
     SourceSnapshot,
@@ -117,17 +128,26 @@ def get_or_create_revision(
     return revision
 
 
-def _priority(j: ClaimJudgement) -> str:
-    if j.verdict == Verdict.contradicted or (
-        j.verdict == Verdict.not_supported and j.confidence >= 0.75
-    ):
+def _priority(v: Verification, needs_offline_check: bool) -> str:
+    if v.verdict == Verdict.contradicted and v.severity != "minor":
         return "high"
-    if j.verdict == Verdict.not_supported or j.confidence >= 0.75:
+    if needs_offline_check or v.severity == "minor":
+        return "low"
+    confident = (v.model_confidence or 0) >= 0.75
+    if v.verdict == Verdict.not_supported and confident:
+        return "high"
+    if v.verdict == Verdict.not_supported or confident:
         return "medium"
     return "low"
 
 
-def check_quotes(j: ClaimJudgement, source_text: str, context: int) -> tuple[list[dict], bool]:
+def check_quotes(
+    j: ClaimJudgement, sources: dict[int, tuple[int | None, str]], context: int
+) -> tuple[list[dict], bool]:
+    """Check every quote against the text of the source it names.
+
+    `sources` maps the source number shown to the model to (citation_id, text).
+    """
     quotes: list[dict] = []
     all_ok = True
     for kind, items in (
@@ -135,14 +155,16 @@ def check_quotes(j: ClaimJudgement, source_text: str, context: int) -> tuple[lis
         ("contradicting", j.contradicting_quotes),
     ):
         for q in items:
-            span = find_quote(q.text, source_text)
+            src = sources.get(q.source_id)
+            span = find_quote(q.text, src[1]) if src else None
             quotes.append(
                 {
                     "kind": kind,
+                    "citation_id": src[0] if src else None,
                     "text": q.text,
                     "translation": q.translation or None,
                     "verified": span is not None,
-                    "excerpt": excerpt(source_text, *span, context) if span else None,
+                    "excerpt": excerpt(src[1], *span, context) if span else None,
                 }
             )
             all_ok &= span is not None
@@ -155,6 +177,23 @@ def check_quotes(j: ClaimJudgement, source_text: str, context: int) -> tuple[lis
     ):
         all_ok = False
     return quotes, all_ok
+
+
+def latest_source_verdicts(session: Session, claim: Claim) -> dict[int, Verification]:
+    """The most recent per-source verdict for each of the claim's citations."""
+    latest: dict[int, Verification] = {}
+    rows = session.scalars(
+        select(Verification)
+        .where(Verification.claim_id == claim.id, Verification.kind == "source")
+        .order_by(Verification.id)
+    )
+    for v in rows:
+        latest[v.citation_id] = v
+    return latest
+
+
+UNREADABLE = {Verdict.source_unavailable, Verdict.source_insufficient}
+UNDECIDED = {FindingStatus.open, FindingStatus.needs_research}
 
 
 class Analyzer:
@@ -215,19 +254,24 @@ class Analyzer:
             )
         return self._fetch(url, via_archive=True) if url else None
 
-    # -- judging -------------------------------------------------------------------
+    # -- stage 1: one source, every claim that cites it --------------------------------
 
     def _judge(self, citation: Citation, fetched: FetchResult, claims: list[Claim]):
         text = select_passages(
             fetched.text, [c.text for c in claims], self.settings.wcm_max_source_chars
         )
-        return self.judge.judge(
+        source = SourceInput(
+            source_id=1,
             citation_text=citation.text,
-            source_title=fetched.title,
-            source_url=fetched.final_url or fetched.requested_url,
-            source_text=text,
+            url=fetched.final_url or fetched.requested_url,
+            text=text,
+            title=fetched.title,
+        )
+        result = self.judge.judge(
+            sources=[source],
             claims=[ClaimInput(c.id, c.text, c.context_before) for c in claims],
-        ), text
+        )
+        return result, text
 
     def _record_unavailable(self, run, claim, citation, snap, reason: str, stats: Counter):
         self.session.add(
@@ -272,12 +316,12 @@ class Analyzer:
             judged, sent_text = self._judge(citation, result, claims)
         except JudgeError as exc:
             stats["judge_errors"] += 1
-            run.stats = {**(run.stats or {}), "last_error": str(exc)}
+            run.error = f"Last judge error: {exc}"
             log.warning("Judge failed for citation %s: %s", citation.note_id, exc)
             return
 
         # A negative verdict on a live page may just mean the page changed since it
-        # was cited. Re-check those claims against an archived copy before flagging.
+        # was cited. Re-check those claims against an archived copy.
         if not result.via_archive:
             negative = [c for c in claims if judged.judgements[c.id].verdict in NEGATIVE]
             if negative:
@@ -291,39 +335,36 @@ class Analyzer:
                     else:
                         stats["archive_rechecks"] += 1
                         for c in negative:
-                            self._store(
-                                run,
-                                c,
-                                citation,
-                                archived[1],
-                                rejudged,
-                                rejudged.judgements[c.id],
-                                archive_text,
-                                stats,
+                            self._store_source_verdict(
+                                run, c, citation, archived[1], rejudged, archive_text, stats
                             )
                         claims = [c for c in claims if c not in negative]
 
         for c in claims:
-            self._store(run, c, citation, snap, judged, judged.judgements[c.id], sent_text, stats)
+            self._store_source_verdict(run, c, citation, snap, judged, sent_text, stats)
 
-    def _store(
-        self,
-        run,
-        claim,
-        citation,
-        snap,
-        judged,
-        j: ClaimJudgement,
-        source_text: str,
-        stats: Counter,
-    ) -> None:
-        quotes, quotes_ok = check_quotes(j, source_text, self.settings.wcm_excerpt_context_chars)
+    def _store_source_verdict(self, run, claim, citation, snap, judged, text, stats) -> None:
+        j = judged.judgements[claim.id]
+        quotes, quotes_ok = check_quotes(
+            j, {1: (citation.id, text)}, self.settings.wcm_excerpt_context_chars
+        )
+        self._add_verification(run, claim, "source", citation, snap, judged, j, quotes, quotes_ok)
+        stats[f"verdict:{j.verdict}"] += 1
+        if not quotes_ok:
+            # The model quoted text that isn't in the source. Don't trust the verdict.
+            stats["rejected_unverified_quotes"] += 1
+
+    def _add_verification(
+        self, run, claim, kind, citation, snap, judged, j, quotes, quotes_ok
+    ) -> Verification:
         v = Verification(
             run=run,
             claim=claim,
+            kind=kind,
             citation=citation,
             snapshot=snap,
             verdict=j.verdict,
+            severity=j.severity,
             explanation=j.explanation,
             unsupported_parts=j.unsupported_parts,
             quotes=quotes,
@@ -337,36 +378,135 @@ class Analyzer:
         )
         self.session.add(v)
         self.session.flush()
-        stats[f"verdict:{j.verdict}"] += 1
+        return v
 
-        if not quotes_ok:
-            # The model cited text that isn't in the source. Don't trust the verdict.
-            stats["rejected_unverified_quotes"] += 1
+    # -- stage 2: one claim, all of its sources ---------------------------------------
+
+    def assess_claim(self, run: AnalysisRun, claim: Claim, stats: Counter) -> None:
+        latest = latest_source_verdicts(self.session, claim)
+        judged: list[Verification] = []
+        unreadable: list[Citation] = []
+        for citation in claim.citations:
+            v = latest.get(citation.id)
+            if v is None or v.verdict in UNREADABLE:
+                unreadable.append(citation)
+            elif v.prompt_version != PROMPT_VERSION:
+                # Judged with an older prompt and not re-checked this run (error).
+                continue
+            elif v.quotes_verified:
+                judged.append(v)
+        if not judged:
             return
-        if j.verdict in FINDING_VERDICTS and not self._has_existing_finding(claim, citation):
-            self.session.add(
-                Finding(
-                    verification=v,
-                    article_id=run.revision.article_id,
-                    category="F2",
-                    priority=_priority(j),
-                )
-            )
-            stats["findings"] += 1
+        stats["claims_assessed"] += 1
 
-    def _has_existing_finding(self, claim: Claim, citation: Citation) -> bool:
-        return (
-            self.session.scalar(
-                select(Finding.id)
-                .join(Verification)
-                .where(
-                    Verification.claim_id == claim.id,
-                    Verification.citation_id == citation.id,
+        if any(v.verdict == Verdict.supported for v in judged):
+            stats["claims_supported"] += 1
+            self._settle(run, claim, None, False, stats)
+            return
+
+        if len(judged) >= 2:
+            final = self._judge_together(run, claim, judged, stats)
+            if final is None:
+                return
+        else:
+            final = judged[0]
+
+        if final.verdict not in FINDING_VERDICTS:
+            # Supported once the sources are read together, or can't be decided.
+            if final.verdict == Verdict.supported:
+                stats["claims_supported"] += 1
+            self._settle(run, claim, None, False, stats)
+            return
+        needs_offline = bool(unreadable) and final.verdict != Verdict.contradicted
+        self._settle(run, claim, final, needs_offline, stats)
+
+    def _judge_together(
+        self, run: AnalysisRun, claim: Claim, judged: list[Verification], stats: Counter
+    ) -> Verification | None:
+        cap = self.settings.wcm_max_source_chars // len(judged)
+        sources: list[SourceInput] = []
+        texts: dict[int, tuple[int | None, str]] = {}
+        for v in judged:
+            fetched, _ = self._fetch(v.snapshot.requested_url, v.snapshot.via_archive)
+            if not fetched.ok:
+                continue
+            n = len(sources) + 1
+            text = select_passages(fetched.text, [claim.text], cap)
+            sources.append(
+                SourceInput(
+                    source_id=n,
+                    citation_text=v.citation.text,
+                    url=fetched.final_url or fetched.requested_url,
+                    text=text,
+                    title=fetched.title,
                 )
-                .limit(1)
             )
-            is not None
+            texts[n] = (v.citation_id, text)
+        if len(sources) < 2:
+            return judged[0]
+        try:
+            result = self.judge.judge(
+                sources=sources, claims=[ClaimInput(claim.id, claim.text, claim.context_before)]
+            )
+        except JudgeError as exc:
+            stats["judge_errors"] += 1
+            run.error = f"Last judge error: {exc}"
+            log.warning("Combined check failed for claim %s: %s", claim.id, exc)
+            return None
+        j = result.judgements[claim.id]
+        quotes, quotes_ok = check_quotes(j, texts, self.settings.wcm_excerpt_context_chars)
+        stats["combined_checks"] += 1
+        stats[f"combined:{j.verdict}"] += 1
+        v = self._add_verification(run, claim, "claim", None, None, result, j, quotes, quotes_ok)
+        if not quotes_ok:
+            stats["rejected_unverified_quotes"] += 1
+            return None
+        return v
+
+    def _settle(
+        self,
+        run: AnalysisRun,
+        claim: Claim,
+        final: Verification | None,
+        needs_offline: bool,
+        stats: Counter,
+    ) -> None:
+        """Record the claim's outcome: at most one live finding per claim.
+
+        Findings a person has confirmed or dismissed are left alone. Undecided
+        findings from an older prompt version are marked superseded by this
+        assessment."""
+        existing = self.session.scalars(
+            select(Finding).where(Finding.claim_id == claim.id).order_by(Finding.id)
+        ).all()
+        if any(f.status in (FindingStatus.confirmed, FindingStatus.dismissed) for f in existing):
+            return
+        live = []
+        for f in existing:
+            if f.status not in UNDECIDED:
+                continue
+            if f.verification.prompt_version != PROMPT_VERSION:
+                f.status = FindingStatus.superseded
+                stats["superseded_findings"] += 1
+            else:
+                live.append(f)
+        if final is None or live:
+            return
+        self.session.add(
+            Finding(
+                verification=final,
+                article_id=run.revision.article_id,
+                claim_id=claim.id,
+                category="F2",
+                priority=_priority(final, needs_offline),
+                needs_offline_check=needs_offline,
+            )
         )
+        stats["findings"] += 1
+        if needs_offline:
+            stats["needs_offline_check"] += 1
+
+    # -- the run ---------------------------------------------------------------------
 
     def _already_checked(self, citation: Citation) -> bool:
         claim_ids = {c.id for c in citation.claims}
@@ -379,6 +519,25 @@ class Analyzer:
             )
         )
         return judged >= len(claim_ids)
+
+    def _unit(self, run: AnalysisRun, stats: Counter, label: str, fn) -> None:
+        """Run one unit of work and commit it. An unexpected error rolls back this
+        unit only and the run continues; setup errors stop the run."""
+        before = stats.copy()
+        try:
+            fn()
+            self._save_progress(run, stats)
+        except FATAL_ERRORS:
+            raise
+        except Exception as exc:
+            log.exception("%s failed; continuing", label)
+            self.session.rollback()
+            self._snapshots.clear()
+            stats.clear()
+            stats.update(before)
+            stats["unit_errors"] += 1
+            run.error = f"{label}: {type(exc).__name__}: {exc}"
+            self._save_progress(run, stats)
 
     def run(self, run: AnalysisRun) -> None:
         run.status = RunStatus.running
@@ -395,28 +554,27 @@ class Analyzer:
             stats["citations"] = len(revision.citations)
             self._save_progress(run, stats)
 
-            # Each citation is its own unit of work, committed when done. A failure
-            # (a broken PDF, an unexpected response) rolls back that citation only.
             for citation_id in [c.id for c in revision.citations]:
                 citation = self.session.get(Citation, citation_id)
                 if not self.recheck and self._already_checked(citation):
                     stats["skipped_already_checked"] += 1
                     continue
-                before = stats.copy()
-                try:
-                    self.check_citation(run, citation, stats)
-                    self._save_progress(run, stats)
-                except FATAL_ERRORS:
-                    raise
-                except Exception as exc:
-                    log.exception("Citation %s failed; continuing", citation_id)
-                    self.session.rollback()
-                    self._snapshots.clear()
-                    stats.clear()
-                    stats.update(before)
-                    stats["citation_errors"] += 1
-                    run.error = f"Last citation error: {type(exc).__name__}: {exc}"
-                    self._save_progress(run, stats)
+                self._unit(
+                    run,
+                    stats,
+                    f"Citation {citation.note_id}",
+                    lambda c=citation: self.check_citation(run, c, stats),
+                )
+
+            for claim_id in [c.id for c in revision.claims]:
+                self._unit(
+                    run,
+                    stats,
+                    f"Claim {claim_id}",
+                    lambda cid=claim_id: self.assess_claim(
+                        run, self.session.get(Claim, cid), stats
+                    ),
+                )
             run.status = RunStatus.done
         except Exception as exc:
             log.exception("Run %s failed", run.id)
@@ -428,5 +586,5 @@ class Analyzer:
             self._save_progress(run, stats)
 
     def _save_progress(self, run: AnalysisRun, stats: Counter) -> None:
-        run.stats = {k: v for k, v in (run.stats or {}).items() if k == "last_error"} | dict(stats)
+        run.stats = dict(stats)
         self.session.commit()

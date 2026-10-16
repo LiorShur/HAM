@@ -22,6 +22,7 @@ from wcm.models import (
     Review,
     Verification,
 )
+from wcm.pipeline import latest_source_verdicts
 from wcm.reports import DraftNotAllowed, talk_page_draft
 from wcm.wikipedia import permalink
 from wcm.worker import enqueue
@@ -80,6 +81,8 @@ class RunOut(BaseModel):
 
 class FindingSummary(BaseModel):
     id: int
+    severity: str | None
+    needs_offline_check: bool
     article: str
     lang: str
     rev_id: int
@@ -99,20 +102,34 @@ class ReviewOut(BaseModel):
     created_at: datetime
 
 
-class FindingDetail(FindingSummary):
-    permalink: str
-    context_before: str
+class SourceOut(BaseModel):
+    """One of the claim's citations, and what checking its source found."""
+
+    number: int
+    citation_id: int
     citation_text: str
     citation_urls: list[str]
     citation_archive_url: str | None
     citation_quote: str | None
+    verdict: str | None
+    explanation: str
     source_url: str | None
     source_via_archive: bool
     source_status: str | None
     source_fetched_at: datetime | None
+
+
+class FindingDetail(FindingSummary):
+    permalink: str
+    context_before: str
+    # "source": judged against its one readable source. "claim": all of the
+    # claim's readable sources were judged together.
+    assessment: str
     explanation: str
     unsupported_parts: list[str]
+    # Each quote has source_number, matching SourceOut.number.
     quotes: list[dict]
+    sources: list[SourceOut]
     model: str | None
     served_model: str | None
     prompt_version: str | None
@@ -147,6 +164,8 @@ def _summary(f: Finding) -> dict:
     v = f.verification
     return {
         "id": f.id,
+        "severity": v.severity,
+        "needs_offline_check": f.needs_offline_check,
         "article": f.article.title,
         "lang": f.article.lang,
         "rev_id": v.claim.revision.rev_id,
@@ -232,22 +251,46 @@ def list_findings(
 def get_finding(finding_id: int, session: DB, _: Reviewer) -> FindingDetail:
     f = _get_finding(session, finding_id)
     v = f.verification
-    snap = v.snapshot
+    claim = v.claim
+    latest = latest_source_verdicts(session, claim)
+    sources = []
+    for n, citation in enumerate(claim.citations, start=1):
+        sv = latest.get(citation.id)
+        snap = sv.snapshot if sv else None
+        sources.append(
+            SourceOut(
+                number=n,
+                citation_id=citation.id,
+                citation_text=citation.text,
+                citation_urls=citation.urls,
+                citation_archive_url=citation.archive_url,
+                citation_quote=citation.quote,
+                verdict=sv.verdict if sv else None,
+                explanation=sv.explanation if sv else "",
+                source_url=(snap.final_url or snap.requested_url) if snap else None,
+                source_via_archive=bool(snap and snap.via_archive),
+                source_status=snap.status if snap else None,
+                source_fetched_at=snap.fetched_at if snap else None,
+            )
+        )
+    number_of = {s.citation_id: s.number for s in sources}
+    if v.kind == "source" and v.citation_id is not None:
+        quote_citation = v.citation_id  # single-source quotes predate citation_id
+    else:
+        quote_citation = None
+    quotes = [
+        {**q, "source_number": number_of.get(q.get("citation_id") or quote_citation)}
+        for q in v.quotes
+    ]
     return FindingDetail(
         **_summary(f),
-        permalink=permalink(f.article.lang, v.claim.revision.rev_id),
-        context_before=v.claim.context_before,
-        citation_text=v.citation.text,
-        citation_urls=v.citation.urls,
-        citation_archive_url=v.citation.archive_url,
-        citation_quote=v.citation.quote,
-        source_url=(snap.final_url or snap.requested_url) if snap else None,
-        source_via_archive=bool(snap and snap.via_archive),
-        source_status=snap.status if snap else None,
-        source_fetched_at=snap.fetched_at if snap else None,
+        permalink=permalink(f.article.lang, claim.revision.rev_id),
+        context_before=claim.context_before,
+        assessment=v.kind,
         explanation=v.explanation,
         unsupported_parts=v.unsupported_parts,
-        quotes=v.quotes,
+        quotes=quotes,
+        sources=sources,
         model=v.model,
         served_model=v.served_model,
         prompt_version=v.prompt_version,
@@ -285,7 +328,9 @@ def stats(session: DB, _: Reviewer) -> dict:
     verdicts = Counter(
         dict(
             session.execute(
-                select(Verification.verdict, func.count()).group_by(Verification.verdict)
+                select(Verification.verdict, func.count())
+                .where(Verification.kind == "source")
+                .group_by(Verification.verdict)
             ).all()
         )
     )

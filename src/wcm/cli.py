@@ -3,8 +3,7 @@ import logging
 
 import typer
 
-from wcm.db import get_engine, session_scope
-from wcm.models import Base
+from wcm.db import session_scope
 
 app = typer.Typer(help="Wiki Citation Monitor", no_args_is_help=True)
 
@@ -19,9 +18,12 @@ def main(verbose: bool = typer.Option(False, "--verbose", "-v")) -> None:
 
 @app.command("init-db")
 def init_db() -> None:
-    """Create tables directly (local SQLite/dev). Use `alembic upgrade head` on Postgres."""
-    Base.metadata.create_all(get_engine())
-    typer.echo("Tables created.")
+    """Create the database, or upgrade an existing one to the current schema.
+
+    Safe to run again after every `git pull`."""
+    from wcm.db import migrate
+
+    typer.echo(migrate())
 
 
 @app.command()

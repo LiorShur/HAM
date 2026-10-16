@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     # Built web UI. Defaults to web/dist in a source checkout.
     wcm_web_dist: str = str(Path(__file__).resolve().parents[2] / "web" / "dist")
 
+    # Database migrations. Defaults to alembic/ in a source checkout.
+    wcm_alembic_dir: str = str(Path(__file__).resolve().parents[2] / "alembic")
+
     # name:token pairs, comma-separated.
     wcm_reviewer_tokens: str = ""
 

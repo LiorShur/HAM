@@ -83,12 +83,32 @@ class FakeFetcher:
         return self.archive_lookup.get(url)
 
 
-def judgement(claim_id, verdict, supporting=(), contradicting=(), confidence=0.9, parts=()):
+def _quotes(items):
+    # A quote is "text" (from source 1) or (source_id, "text").
+    out = []
+    for item in items:
+        sid, text = item if isinstance(item, tuple) else (1, item)
+        out.append(Quote(source_id=sid, text=text, translation=""))
+    return out
+
+
+def judgement(
+    claim_id,
+    verdict,
+    supporting=(),
+    contradicting=(),
+    confidence=0.9,
+    parts=(),
+    severity=None,
+):
+    if severity is None:
+        severity = "none" if verdict in ("supported", "source_insufficient") else "major"
     return ClaimJudgement(
         claim_id=claim_id,
         verdict=verdict,
-        supporting_quotes=[Quote(text=t, translation="") for t in supporting],
-        contradicting_quotes=[Quote(text=t, translation="") for t in contradicting],
+        supporting_quotes=_quotes(supporting),
+        contradicting_quotes=_quotes(contradicting),
+        severity=severity,
         unsupported_parts=list(parts),
         explanation="test",
         confidence=confidence,
@@ -96,16 +116,18 @@ def judgement(claim_id, verdict, supporting=(), contradicting=(), confidence=0.9
 
 
 class FakeJudge:
-    """Decides by looking up (claim text prefix, source text) in a rule function."""
+    """Decides with a rule function: rule(claim, sources) -> ClaimJudgement, where
+    sources is the list of SourceInput sent (usually one)."""
 
     def __init__(self, rule):
         self.rule = rule
         self.calls = []
 
-    def judge(self, *, citation_text, source_title, source_url, source_text, claims):
-        self.calls.append((source_url, [c.text for c in claims]))
+    def judge(self, *, sources, claims):
+        urls = sources[0].url if len(sources) == 1 else tuple(s.url for s in sources)
+        self.calls.append((urls, [c.text for c in claims]))
         return JudgeResult(
-            judgements={c.claim_id: self.rule(c, source_text) for c in claims},
+            judgements={c.claim_id: self.rule(c, sources) for c in claims},
             model="fake-model",
             served_model="fake-model",
             request_id="req_test",

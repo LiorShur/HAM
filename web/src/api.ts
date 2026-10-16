@@ -14,6 +14,8 @@ export type Run = {
 
 export type FindingSummary = {
   id: number;
+  severity: "none" | "minor" | "major" | null;
+  needs_offline_check: boolean;
   article: string;
   lang: string;
   rev_id: number;
@@ -21,13 +23,14 @@ export type FindingSummary = {
   claim: string;
   verdict: string;
   priority: "high" | "medium" | "low";
-  status: "open" | "confirmed" | "dismissed" | "needs_research";
+  status: "open" | "confirmed" | "dismissed" | "needs_research" | "superseded";
   confidence: number | null;
   created_at: string;
 };
 
 export type Quote = {
   kind: "supporting" | "contradicting";
+  source_number: number | null;
   text: string;
   translation: string | null;
   verified: boolean;
@@ -36,20 +39,29 @@ export type Quote = {
 
 export type Review = { reviewer: string; decision: string; note: string; created_at: string };
 
-export type FindingDetail = FindingSummary & {
-  permalink: string;
-  context_before: string;
+export type SourceResult = {
+  number: number;
+  citation_id: number;
   citation_text: string;
   citation_urls: string[];
   citation_archive_url: string | null;
   citation_quote: string | null;
+  verdict: string | null;
+  explanation: string;
   source_url: string | null;
   source_via_archive: boolean;
   source_status: string | null;
   source_fetched_at: string | null;
+};
+
+export type FindingDetail = FindingSummary & {
+  permalink: string;
+  context_before: string;
+  assessment: "source" | "claim";
   explanation: string;
   unsupported_parts: string[];
   quotes: Quote[];
+  sources: SourceResult[];
   model: string | null;
   served_model: string | null;
   prompt_version: string | null;
