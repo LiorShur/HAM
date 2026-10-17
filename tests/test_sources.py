@@ -103,3 +103,64 @@ def test_corrupt_pdf_yields_no_text_instead_of_raising():
         b"trailer<</Root 1 0 R>>\n%%EOF"
     )
     assert _pdf_text(broken)[0] == ""
+
+
+# --- Rate limiting -------------------------------------------------------------------
+
+
+@respx.mock
+def test_archive_lookup_retries_after_429_and_caches_the_answer():
+    route = respx.get("https://archive.org/wayback/available").mock(
+        side_effect=[
+            httpx.Response(429, headers={"retry-after": "7"}),
+            httpx.Response(
+                200,
+                json={
+                    "archived_snapshots": {
+                        "closest": {
+                            "available": True,
+                            "url": "http://web.archive.org/web/2020/https://x.org",
+                        }
+                    }
+                },
+            ),
+        ]
+    )
+    waits = []
+    f = SourceFetcher(min_interval=0, archive_interval=0, sleep=waits.append)
+    assert f.find_archive("https://x.org", None).endswith("x.org")
+    assert 7.0 in waits  # honoured Retry-After
+    assert f.find_archive("https://x.org", None).endswith("x.org")
+    assert route.call_count == 2  # second answer came from the cache
+
+
+@respx.mock
+def test_archive_lookup_gives_up_after_repeated_429s_without_caching():
+    route = respx.get("https://archive.org/wayback/available").mock(
+        return_value=httpx.Response(429)
+    )
+    f = SourceFetcher(min_interval=0, archive_interval=0, sleep=lambda s: None)
+    assert f.find_archive("https://x.org", None) is None
+    assert route.call_count == SourceFetcher.MAX_ATTEMPTS
+    f.find_archive("https://x.org", None)
+    assert route.call_count == 2 * SourceFetcher.MAX_ATTEMPTS
+
+
+@respx.mock
+def test_fetch_retries_rate_limited_pages():
+    respx.get("https://web.archive.org/web/2020id_/https://x.org").mock(
+        side_effect=[
+            httpx.Response(429),
+            httpx.Response(200, headers={"content-type": "text/plain"}, text="archived text"),
+        ]
+    )
+    f = SourceFetcher(min_interval=0, archive_interval=0, sleep=lambda s: None)
+    r = f.fetch("https://web.archive.org/web/2020/https://x.org", via_archive=True)
+    assert r.status == "ok" and r.text == "archived text"
+
+
+def test_archive_hosts_share_a_slower_request_budget():
+    f = SourceFetcher(min_interval=0.0, archive_interval=2.0, sleep=lambda s: None)
+    assert f._bucket("https://web.archive.org/web/1/x") == ("archive.org", 2.0)
+    assert f._bucket("https://archive.org/wayback/available") == ("archive.org", 2.0)
+    assert f._bucket("https://www.nps.gov/x") == ("www.nps.gov", 0.0)

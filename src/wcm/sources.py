@@ -2,6 +2,7 @@
 
 import hashlib
 import io
+import logging
 import re
 import time
 import unicodedata
@@ -15,6 +16,8 @@ from bs4 import BeautifulSoup
 from pypdf import PdfReader
 
 from wcm.config import get_settings
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -67,7 +70,19 @@ def parse_access_date(value: str | None) -> datetime | None:
 
 
 class SourceFetcher:
-    def __init__(self, client: httpx.Client | None = None, min_interval: float = 1.0):
+    # The Internet Archive rate-limits aggressively (HTTP 429), so its hosts share
+    # one, slower, request budget.
+    ARCHIVE_INTERVAL = 2.0
+    MAX_ATTEMPTS = 3
+    MAX_RETRY_WAIT = 60.0
+
+    def __init__(
+        self,
+        client: httpx.Client | None = None,
+        min_interval: float = 1.0,
+        archive_interval: float | None = None,
+        sleep=time.sleep,
+    ):
         self.settings = get_settings()
         self.http = client or httpx.Client(
             headers={"User-Agent": self.settings.user_agent},
@@ -75,46 +90,77 @@ class SourceFetcher:
             follow_redirects=True,
         )
         self.min_interval = min_interval
+        self.archive_interval = (
+            self.ARCHIVE_INTERVAL if archive_interval is None else archive_interval
+        )
+        self._sleep = sleep
         self._last_hit: dict[str, float] = {}
+        self._archive_lookups: dict[tuple[str, str | None], str | None] = {}
+
+    def _bucket(self, url: str) -> tuple[str, float]:
+        host = (urlparse(url).hostname or "").lower()
+        if host == "archive.org" or host.endswith(".archive.org"):
+            return "archive.org", self.archive_interval
+        return host, self.min_interval
 
     def _throttle(self, url: str) -> None:
-        host = urlparse(url).hostname or ""
-        wait = self._last_hit.get(host, 0) + self.min_interval - time.monotonic()
+        bucket, interval = self._bucket(url)
+        wait = self._last_hit.get(bucket, 0) + interval - time.monotonic()
         if wait > 0:
-            time.sleep(wait)
-        self._last_hit[host] = time.monotonic()
+            self._sleep(wait)
+        self._last_hit[bucket] = time.monotonic()
+
+    def _retry_wait(self, resp: httpx.Response, attempt: int) -> float | None:
+        """Seconds to wait before retrying a rate-limited response, or None."""
+        if resp.status_code not in (429, 503) or attempt + 1 >= self.MAX_ATTEMPTS:
+            return None
+        try:
+            wait = float(resp.headers.get("retry-after", ""))
+        except ValueError:
+            wait = 5.0 * (attempt + 1)
+        return min(max(wait, 1.0), self.MAX_RETRY_WAIT)
 
     def fetch(self, url: str, via_archive: bool = False) -> FetchResult:
         target = raw_archive_url(url) if via_archive else url
-        self._throttle(target)
         try:
-            with self.http.stream("GET", target) as resp:
-                ctype = resp.headers.get("content-type", "").split(";")[0].strip().lower()
-                if resp.status_code >= 400:
-                    return FetchResult(
-                        url,
-                        "http_error",
-                        http_status=resp.status_code,
-                        content_type=ctype,
-                        via_archive=via_archive,
-                        final_url=str(resp.url),
-                    )
-                body = bytearray()
-                for chunk in resp.iter_bytes():
-                    body.extend(chunk)
-                    if len(body) > self.settings.wcm_fetch_max_bytes:
-                        return FetchResult(
-                            url,
-                            "too_large",
-                            http_status=resp.status_code,
-                            content_type=ctype,
-                            via_archive=via_archive,
-                        )
-                final_url = str(resp.url)
-                status_code = resp.status_code
-                encoding = resp.encoding
+            for attempt in range(self.MAX_ATTEMPTS):
+                self._throttle(target)
+                with self.http.stream("GET", target) as resp:
+                    wait = self._retry_wait(resp, attempt)
+                    if wait is None:
+                        result = self._read(url, via_archive, resp)
+                        break
+                log.info("Rate-limited by %s; retrying in %.0fs", urlparse(target).hostname, wait)
+                self._sleep(wait)
         except httpx.HTTPError as exc:
             return FetchResult(url, "network_error", error=str(exc), via_archive=via_archive)
+        return result
+
+    def _read(self, url: str, via_archive: bool, resp: httpx.Response) -> FetchResult:
+        ctype = resp.headers.get("content-type", "").split(";")[0].strip().lower()
+        if resp.status_code >= 400:
+            return FetchResult(
+                url,
+                "http_error",
+                http_status=resp.status_code,
+                content_type=ctype,
+                via_archive=via_archive,
+                final_url=str(resp.url),
+            )
+        body = bytearray()
+        for chunk in resp.iter_bytes():
+            body.extend(chunk)
+            if len(body) > self.settings.wcm_fetch_max_bytes:
+                return FetchResult(
+                    url,
+                    "too_large",
+                    http_status=resp.status_code,
+                    content_type=ctype,
+                    via_archive=via_archive,
+                )
+        final_url = str(resp.url)
+        status_code = resp.status_code
+        encoding = resp.encoding
 
         result = FetchResult(
             url,
@@ -147,13 +193,27 @@ class SourceFetcher:
         params = {"url": url}
         if near:
             params["timestamp"] = near.strftime("%Y%m%d")
+        key = (url, params.get("timestamp"))
+        if key in self._archive_lookups:
+            return self._archive_lookups[key]
+        endpoint = "https://archive.org/wayback/available"
         try:
-            resp = self.http.get("https://archive.org/wayback/available", params=params)
+            for attempt in range(self.MAX_ATTEMPTS):
+                self._throttle(endpoint)
+                resp = self.http.get(endpoint, params=params)
+                wait = self._retry_wait(resp, attempt)
+                if wait is None:
+                    break
+                log.info("Rate-limited by archive.org; retrying in %.0fs", wait)
+                self._sleep(wait)
             resp.raise_for_status()
             closest = resp.json().get("archived_snapshots", {}).get("closest") or {}
         except (httpx.HTTPError, ValueError):
+            # Not cached: a later lookup may succeed once the rate limit clears.
             return None
-        return closest.get("url") if closest.get("available") else None
+        found = closest.get("url") if closest.get("available") else None
+        self._archive_lookups[key] = found
+        return found
 
 
 def _html_text(html: str) -> tuple[str, str | None]:
