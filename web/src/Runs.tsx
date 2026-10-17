@@ -72,6 +72,7 @@ export default function Runs({ client }: { client: Api }) {
               <th>Status</th>
               <th>Claims</th>
               <th>Findings</th>
+              <th>No citation</th>
               <th>Unavailable sources</th>
               <th>By</th>
             </tr>
@@ -88,6 +89,7 @@ export default function Runs({ client }: { client: Api }) {
                 </td>
                 <td>{r.stats.claims ?? "—"}</td>
                 <td>{r.stats.findings ?? 0}</td>
+                <td>{r.stats.uncited_findings ?? 0}</td>
                 <td>{r.stats["verdict:source_unavailable"] ?? 0}</td>
                 <td>{r.requested_by}</td>
               </tr>

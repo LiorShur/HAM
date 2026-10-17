@@ -1,9 +1,12 @@
 """Turn Parsoid HTML for one article revision into claims and the citations behind them.
 
-A "claim" is a sentence that carries at least one footnote. Footnotes usually sit at
-the end of the text they support, but one footnote often covers several preceding
-sentences, so uncited sentences before a cited one are kept as `context_before`
-and the judge decides how much of that the source has to support.
+A cited claim is a sentence that carries at least one footnote. Footnotes usually
+sit at the end of the text they support, and one footnote often covers several
+preceding sentences, so uncited sentences before a cited one are treated as covered
+by it and kept as `context_before`.
+
+An uncited claim is a sentence that no footnote can be covering: one after the last
+footnote in its paragraph, or in a paragraph with no footnotes at all.
 """
 
 import json
@@ -113,6 +116,12 @@ class ParsedClaim:
     text: str
     context_before: str
     note_ids: list[str]
+    # Wikipedia already marks it with {{citation needed}}.
+    citation_needed: bool = False
+
+    @property
+    def cited(self) -> bool:
+        return bool(self.note_ids)
 
 
 @dataclass
@@ -188,10 +197,16 @@ def parse_citations(soup: BeautifulSoup) -> dict[str, ParsedCitation]:
     return citations
 
 
-def _flatten(node: Tag) -> tuple[str, list[tuple[int, str]]]:
-    """Plain text of a block plus (offset, note_id) for each footnote marker."""
+def _is_citation_needed(tag: Tag) -> bool:
+    return "Template-Fact" in _classes(tag) or "citation needed" in tag.get_text().lower()
+
+
+def _flatten(node: Tag) -> tuple[str, list[tuple[int, str]], list[int]]:
+    """Plain text of a block, (offset, note_id) for each footnote marker, and the
+    offsets of {{citation needed}} tags."""
     parts: list[str] = []
     markers: list[tuple[int, str]] = []
+    needed: list[int] = []
     length = 0
 
     def walk(n: Tag) -> None:
@@ -208,12 +223,15 @@ def _flatten(node: Tag) -> tuple[str, list[tuple[int, str]]]:
                     if note_id:
                         markers.append((length, note_id))
                     continue
+                if child.name in ("sup", "span") and _is_citation_needed(child):
+                    needed.append(length)
+                    continue
                 if child.name in ("style", "script") or classes & {"noprint", "mw-empty-elt"}:
                     continue
                 walk(child)
 
     walk(node)
-    return "".join(parts), markers
+    return "".join(parts), markers, needed
 
 
 def split_sentences(text: str) -> list[tuple[int, int]]:
@@ -257,27 +275,57 @@ def _blocks(soup: BeautifulSoup):
         yield section, el
 
 
+# Sections that list links or sources rather than making claims.
+SKIP_SECTIONS = {
+    "see also",
+    "references",
+    "notes",
+    "footnotes",
+    "citations",
+    "sources",
+    "bibliography",
+    "works cited",
+    "further reading",
+    "external links",
+}
+
+
+def _sentence_at(spans: list[tuple[int, int]], offset: int) -> int:
+    """The sentence a marker at `offset` belongs to (markers follow their text)."""
+    idx = 0
+    for i, (s, _) in enumerate(spans):
+        if s < offset:
+            idx = i
+    return idx
+
+
+def _is_statement(sentence: str) -> bool:
+    """Skip fragments: very short text and lines that only introduce a list."""
+    return len(sentence) >= 25 and not sentence.endswith(":")
+
+
 def parse_article(html: str) -> ParsedArticle:
     soup = BeautifulSoup(html, "lxml")
     citations = parse_citations(soup)
     claims: list[ParsedClaim] = []
 
     for paragraph_index, (section, block) in enumerate(_blocks(soup)):
-        text, markers = _flatten(block)
-        if not markers or not text.strip():
+        if section.strip().lower() in SKIP_SECTIONS:
+            continue
+        text, markers, needed = _flatten(block)
+        if not text.strip():
             continue
         spans = split_sentences(text)
         notes_by_sentence: dict[int, list[str]] = {}
         for offset, note_id in markers:
-            idx = 0
-            for i, (s, _) in enumerate(spans):
-                if s < offset:
-                    idx = i
-            ids = notes_by_sentence.setdefault(idx, [])
+            ids = notes_by_sentence.setdefault(_sentence_at(spans, offset), [])
             if note_id not in ids:
                 ids.append(note_id)
+        tagged = {_sentence_at(spans, offset) for offset in needed}
+        last_cited = max(notes_by_sentence, default=-1)
 
-        pending: list[str] = []
+        pending: list[str] = []  # uncited sentences since the last cited one
+        previous: list[str] = []  # every sentence so far, for context
         for i, (s, e) in enumerate(spans):
             sentence = " ".join(text[s:e].split())
             if i in notes_by_sentence:
@@ -289,10 +337,24 @@ def parse_article(html: str) -> ParsedArticle:
                         text=sentence,
                         context_before=" ".join(pending),
                         note_ids=notes_by_sentence[i],
+                        citation_needed=i in tagged,
                     )
                 )
                 pending = []
+            elif i > last_cited and _is_statement(sentence):
+                claims.append(
+                    ParsedClaim(
+                        section=section,
+                        paragraph_index=paragraph_index,
+                        sentence_index=i,
+                        text=sentence,
+                        context_before=" ".join(previous[-2:]),
+                        note_ids=[],
+                        citation_needed=i in tagged,
+                    )
+                )
             else:
                 pending.append(sentence)
+            previous.append(sentence)
 
     return ParsedArticle(citations=citations, claims=claims)

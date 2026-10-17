@@ -14,6 +14,7 @@ export type Run = {
 
 export type FindingSummary = {
   id: number;
+  category: "F2" | "uncited";
   severity: "none" | "minor" | "major" | null;
   needs_offline_check: boolean;
   article: string;
@@ -57,7 +58,8 @@ export type SourceResult = {
 export type FindingDetail = FindingSummary & {
   permalink: string;
   context_before: string;
-  assessment: "source" | "claim";
+  assessment: "source" | "claim" | "triage";
+  details: { living_person?: boolean; in_lead?: boolean; citation_needed_tag?: boolean };
   explanation: string;
   unsupported_parts: string[];
   quotes: Quote[];
@@ -129,8 +131,12 @@ export const api = (token: string) => ({
   runs: () => request<Run[]>(token, "/api/runs"),
   createRun: (body: { title?: string; rev_id?: number; lang: string }) =>
     request<Run>(token, "/api/runs", { method: "POST", body: JSON.stringify(body) }),
-  findings: (status: string) =>
-    request<FindingSummary[]>(token, `/api/findings${status ? `?status=${status}` : ""}`),
+  findings: (status: string, category: string) => {
+    const params = new URLSearchParams();
+    if (status) params.set("status", status);
+    if (category) params.set("category", category);
+    return request<FindingSummary[]>(token, `/api/findings?${params}`);
+  },
   finding: (id: number) => request<FindingDetail>(token, `/api/findings/${id}`),
   review: (id: number, decision: string, note: string) =>
     request<{ status: string }>(token, `/api/findings/${id}/reviews`, {

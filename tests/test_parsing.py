@@ -77,3 +77,35 @@ def test_archive_detection():
 def test_citation_text_has_no_stray_spaces():
     text = parsed().citations["cite_note-built-1"].text
     assert text.startswith('"Harbor Point Light". Example Lighthouse Society.')
+
+
+def test_uncited_statements_are_extracted():
+    from wcm.parsing import parse_article
+
+    html = (FIXTURE.parent / "parsoid_uncited.html").read_text()
+    claims = parse_article(html).claims
+    cited = [c for c in claims if c.cited]
+    uncited = {c.text: c for c in claims if not c.cited}
+
+    # Covered by the footnote after it: not uncited, kept as context instead.
+    assert [c.text for c in cited] == ["It was granted a charter in 1851."]
+    assert cited[0].context_before == "The town was founded by fishermen in 1820."
+
+    assert set(uncited) == {
+        "Example Town is a small town in Example County on the northern coast.",
+        "About 300 residents were killed in the flood of 1862.",
+        "The former mayor, John Example, was accused of embezzling council funds in 2019.",
+        "The town has had a public library since 1902.",
+    }
+    # Context: the sentences just before it in the paragraph.
+    flood = uncited["About 300 residents were killed in the flood of 1862."]
+    assert flood.context_before.endswith("It was granted a charter in 1851.")
+    assert uncited["The town has had a public library since 1902."].citation_needed
+    assert (
+        uncited["Example Town is a small town in Example County on the northern coast."].section
+        == "(lead)"
+    )
+
+
+def test_fixture_with_only_covered_sentences_has_no_uncited_claims():
+    assert all(c.cited for c in parsed().claims)

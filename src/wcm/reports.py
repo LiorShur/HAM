@@ -38,11 +38,51 @@ SOURCE_RESULT = {
 }
 
 
+def uncited_draft(finding: Finding) -> str:
+    v = finding.verification
+    claim = v.claim
+    revision = claim.revision
+    details = v.details or {}
+    reviewer_note = next(
+        (r.note for r in reversed(finding.reviews) if r.decision == "confirmed" and r.note), ""
+    )
+    policy = "[[WP:V]]"
+    if details.get("living_person"):
+        policy = "[[WP:V]] and [[WP:BLP]] (it concerns a living person)"
+    lines = [
+        f'== Unsourced statement: "{_clip(claim.text, 60)}" ==',
+        "<!-- DRAFT. Before posting: check the article history and the rest of the",
+        "     article for a source, rewrite this in your own words, and say that you",
+        "     used a citation-checking tool. One issue per thread. -->",
+        (
+            f"In [[Special:PermanentLink/{revision.rev_id}|revision {revision.rev_id}]], "
+            f'section "{claim.section}", the article says:'
+        ),
+        f':"{claim.text}"',
+        "",
+        "This statement has no citation.",
+    ]
+    if details.get("citation_needed_tag"):
+        lines.append("It is already tagged {{citation needed}}.")
+    lines += [
+        "",
+        reviewer_note or "[Your own short explanation here.]",
+        "",
+        (
+            f"Per {policy}, could someone add a reliable source for this? If none can be "
+            "found, it may need to be rephrased or removed. ~~~~"
+        ),
+    ]
+    return "\n".join(lines)
+
+
 def talk_page_draft(finding: Finding) -> str:
     from wcm.pipeline import latest_source_verdicts
 
     if finding.status != FindingStatus.confirmed:
         raise DraftNotAllowed("Only confirmed findings get a talk-page draft.")
+    if finding.category == "uncited":
+        return uncited_draft(finding)
 
     v = finding.verification
     claim = v.claim

@@ -114,3 +114,31 @@ def test_multi_source_finding_detail_and_draft(client, session):
     draft = client.get(f"/api/findings/{kid}/talk-draft", headers=A).text
     assert "I could not check it online" in draft
     assert "may cover the rest" in draft
+
+
+def test_uncited_findings_in_api(client, session):
+    from test_uncited import run as run_town
+
+    run_town(session)
+    session.commit()
+    uncited = client.get("/api/findings?category=uncited", headers=A).json()
+    assert [f["priority"] for f in uncited] == ["high", "high", "low"]  # high first
+    assert all(f["category"] == "uncited" for f in uncited)
+    assert client.get("/api/findings?category=F2", headers=A).json() == []
+
+    mayor = next(f for f in uncited if f["claim"].startswith("The former mayor"))
+    detail = client.get(f"/api/findings/{mayor['id']}", headers=A).json()
+    assert detail["assessment"] == "triage"
+    assert detail["severity"] == "contentious"
+    assert detail["details"]["living_person"] is True
+    assert detail["sources"] == []
+
+    client.post(
+        f"/api/findings/{mayor['id']}/reviews",
+        headers=A,
+        json={"decision": "confirmed", "note": "No source anywhere in the article."},
+    )
+    draft = client.get(f"/api/findings/{mayor['id']}/talk-draft", headers=A).text
+    assert "Unsourced statement" in draft
+    assert "[[WP:BLP]]" in draft
+    assert "No source anywhere in the article." in draft

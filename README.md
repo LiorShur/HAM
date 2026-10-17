@@ -32,6 +32,8 @@ article title or revision id
     Claude judges them together
   → at most one finding per claim goes to the
     review queue                                      (wcm/api.py, web/)
+  → stage 3, sentences no footnote covers: a fast
+    model ranks how much each needs a source          (wcm/triage.py)
   → a confirmed finding gets a talk-page draft that
     the reviewer rewrites in their own words          (wcm/reports.py)
 ```
@@ -50,6 +52,18 @@ found in the source. Findings are marked:
   everything but the claim also cites a source that can't be read online, such as
   a book.
 
+**Statements with no citation.** A sentence counts as uncited when it comes after
+the last footnote in its paragraph, or its paragraph has no footnotes; sentences
+before a footnote are assumed to be covered by it. Claude Haiku 5.5 sorts each one
+into *contentious* (casualty figures, allegations of crimes, responsibility for
+events, named living people, loaded terms in the article's own voice), *specific*
+(other checkable facts) or *general*. It does not judge whether the statement is
+true. Contentious statements are high priority and specific ones medium; general
+ones get no finding. Lead sentences and ones Wikipedia already tags
+{{citation needed}} drop one level, except contentious statements about living
+people (WP:BLP). Ranking a whole article costs about a cent or less. `wcm scan
+--skip-uncited` turns this off.
+
 When the prompt changes (`PROMPT_VERSION` in `wcm/judge.py`), re-running an
 article re-judges it, and any finding nobody has decided on yet is marked
 *superseded* by the new assessment. Confirmed and dismissed findings are kept.
@@ -67,6 +81,11 @@ request, the API retries it on Anthropic's recommended fallback model. That can
 happen with sources on violent events. The model that actually answered is
 stored in `verifications.served_model`. Set `WCM_JUDGE_MODEL` / `WCM_JUDGE_EFFORT`
 to change these.
+
+Uncited statements are ranked by **Claude Haiku 5.5** (`claude-haiku-5-5`) at
+`low` effort (`WCM_TRIAGE_MODEL`, `WCM_TRIAGE_EFFORT`). Haiku has no server-side
+refusal fallback; if it declines, the statements are left unranked and the run
+continues.
 
 Cost: each cited source is sent once, together with every claim in the revision
 that cites it. Sources longer than `WCM_MAX_SOURCE_CHARS` are trimmed to the

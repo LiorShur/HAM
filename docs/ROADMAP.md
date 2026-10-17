@@ -20,6 +20,8 @@
 - [x] First real article (Cape Hatteras Lighthouse): most false alarms came from
       judging each sentence–source pair separately. Now one assessment per claim,
       sources judged together, offline sources flagged, minor differences marked.
+- [x] Uncited statements: found by position relative to footnotes, ranked by
+      Claude Haiku 5.5 (contentious / specific / general) without judging truth.
 - [ ] Try on real articles once there's network access to Wikipedia, and tune
       the claim extraction (lists, tables, quotes).
 - [ ] Books: page-level lookup through Internet Archive / Google Books where a

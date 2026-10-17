@@ -165,3 +165,4 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
 .sources .citation { margin-bottom: 0.15rem; }
 .notice { background: var(--warn-bg); color: var(--warn); border-radius: 6px; padding: 0.5rem 0.7rem; font-size: 0.9rem; }
 .v-source_unavailable, .v-source_insufficient, .v-none { background: var(--bg); color: var(--muted); }
+.filters.secondary { padding-top: 0; }

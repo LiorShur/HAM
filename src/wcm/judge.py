@@ -177,18 +177,21 @@ def build_user_message(*, sources: list[SourceInput], claims: list[ClaimInput]) 
     )
 
 
+def make_client() -> anthropic.Anthropic:
+    """An Anthropic client using the API key from .env (or the environment)."""
+    key = get_settings().anthropic_api_key or None
+    if not key and not os.environ.get("ANTHROPIC_AUTH_TOKEN"):
+        raise JudgeConfigError(
+            "No Anthropic API key found. Add ANTHROPIC_API_KEY=sk-ant-... to the .env "
+            "file in the folder you run wcm from, or set it as an environment variable."
+        )
+    return anthropic.Anthropic(api_key=key)
+
+
 class ClaudeJudge:
     def __init__(self, client: anthropic.Anthropic | None = None):
         self.settings = get_settings()
-        if client is None:
-            key = self.settings.anthropic_api_key or None
-            if not key and not os.environ.get("ANTHROPIC_AUTH_TOKEN"):
-                raise JudgeConfigError(
-                    "No Anthropic API key found. Add ANTHROPIC_API_KEY=sk-ant-... to the .env "
-                    "file in the folder you run wcm from, or set it as an environment variable."
-                )
-            client = anthropic.Anthropic(api_key=key)
-        self.client = client
+        self.client = client or make_client()
 
     def judge(self, *, sources: list[SourceInput], claims: list[ClaimInput]) -> JudgeResult:
         model = self.settings.wcm_judge_model

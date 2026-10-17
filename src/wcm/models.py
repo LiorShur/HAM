@@ -22,6 +22,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     false,
+    true,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -51,6 +52,8 @@ class Verdict(StrEnum):
     source_insufficient = "source_insufficient"
     # Set by the pipeline, not the model: no URL, fetch failed, unsupported format.
     source_unavailable = "source_unavailable"
+    # A sentence with no citation (Verification kind="triage").
+    uncited = "uncited"
 
 
 class FindingStatus(StrEnum):
@@ -91,6 +94,9 @@ class Revision(Base):
     timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     html_sha256: Mapped[str] = mapped_column(String(64))
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # Which parsing rules produced its claims (see pipeline.PARSER_VERSION).
+    # Version 1 stored cited sentences only.
+    parser_version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
 
     article: Mapped[Article] = relationship(back_populates="revisions")
     citations: Mapped[list["Citation"]] = relationship(back_populates="revision")
@@ -134,9 +140,16 @@ class Claim(Base):
     paragraph_index: Mapped[int] = mapped_column(Integer)
     sentence_index: Mapped[int] = mapped_column(Integer)
     text: Mapped[str] = mapped_column(Text)
-    # Uncited sentences just before this one in the same paragraph. A footnote
-    # often covers them too, so the judge sees them as context.
+    # For cited claims: uncited sentences just before this one in the same paragraph.
+    # A footnote often covers them too, so the judge sees them as context.
+    # For uncited claims: the sentences just before it, to resolve references.
     context_before: Mapped[str] = mapped_column(Text, default="")
+    # False: no footnote covers this sentence.
+    cited: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true())
+    # Wikipedia already has a {{citation needed}} tag on it.
+    citation_needed_tag: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=false()
+    )
 
     revision: Mapped[Revision] = relationship(back_populates="claims")
     citations: Mapped[list[Citation]] = relationship(
@@ -184,7 +197,7 @@ class Verification(Base):
     """One judgement. kind="source": does this one citation's source support the
     claim? kind="claim": do all of the claim's sources, taken together, support it?
     (citation_id and snapshot_id are empty for kind="claim"; each quote records the
-    citation it came from.)"""
+    citation it came from.) kind="triage": how much an uncited claim needs a source."""
 
     __tablename__ = "verifications"
 
@@ -196,8 +209,10 @@ class Verification(Base):
     snapshot_id: Mapped[int | None] = mapped_column(ForeignKey("source_snapshots.id"))
     verdict: Mapped[str] = mapped_column(String(32))
     explanation: Mapped[str] = mapped_column(Text, default="")
-    # none | minor | major
-    severity: Mapped[str | None] = mapped_column(String(8))
+    # none | minor | major; for kind="triage": contentious | specific | general
+    severity: Mapped[str | None] = mapped_column(String(16))
+    # kind="triage": {"living_person": bool, "in_lead": bool, "citation_needed_tag": bool}
+    details: Mapped[dict] = mapped_column(JSON, default=dict, server_default="{}")
     unsupported_parts: Mapped[list[str]] = mapped_column(JSON, default=list)
     # [{"kind": "supporting"|"contradicting", "citation_id": int, "text": ...,
     #   "translation": ..., "verified": bool, "excerpt": ...}]
@@ -231,7 +246,8 @@ class Finding(Base):
     needs_offline_check: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default=false()
     )
-    # F2 = citation mismatch. Later phases add F1, F3, F4, F5.
+    # F2 = citation mismatch; "uncited" = no citation for a statement that needs one.
+    # Later phases add F1, F3, F4, F5.
     category: Mapped[str] = mapped_column(String(8), default="F2")
     priority: Mapped[str] = mapped_column(String(8))
     status: Mapped[str] = mapped_column(String(16), default=FindingStatus.open)

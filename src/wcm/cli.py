@@ -34,22 +34,25 @@ def scan(
     recheck: bool = typer.Option(
         False, help="Judge every citation again, even ones already checked for this revision"
     ),
+    skip_uncited: bool = typer.Option(False, help="Don't rank statements that have no citation"),
 ) -> None:
     """Analyse one article now, in this process."""
     from wcm.judge import ClaudeJudge
     from wcm.models import RunStatus
+    from wcm.triage import ClaudeTriage
     from wcm.worker import enqueue, process
 
     if not title and rev is None:
         raise typer.BadParameter("Give a title or --rev")
     judge = _make_judge(ClaudeJudge)
+    triage = None if skip_uncited else _make_judge(ClaudeTriage)
     with session_scope() as session:
         run = enqueue(session, title, rev, lang, requested_by="cli")
         # Mark it as taken before committing, so a running `wcm worker` doesn't
         # pick up the same run.
         run.status = RunStatus.running
         session.commit()
-        process(session, run, judge=judge, recheck=recheck)
+        process(session, run, judge=judge, recheck=recheck, triage=triage)
     # Report after the session has committed: raising Exit inside the `with`
     # block would roll back the run's results.
     typer.echo(f"Run {run.id}: {run.status}")
@@ -84,9 +87,10 @@ def _make_judge(factory):
 def worker(poll: float = typer.Option(5.0, help="Seconds between queue polls")) -> None:
     """Process queued runs forever."""
     from wcm.judge import ClaudeJudge
+    from wcm.triage import ClaudeTriage
     from wcm.worker import work_forever
 
-    work_forever(poll, judge=_make_judge(ClaudeJudge))
+    work_forever(poll, judge=_make_judge(ClaudeJudge), triage=_make_judge(ClaudeTriage))
 
 
 @app.command()

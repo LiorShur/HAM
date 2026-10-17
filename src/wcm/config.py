@@ -22,6 +22,12 @@ class Settings(BaseSettings):
     wcm_judge_effort: str = "high"
     wcm_judge_max_tokens: int = 32000
 
+    # Ranking uncited statements is a simple classification task, so it uses the
+    # fast, low-cost model at low effort.
+    wcm_triage_model: str = "claude-haiku-5-5"
+    wcm_triage_effort: str = "low"
+    wcm_triage_max_tokens: int = 16000
+
     # Sources longer than this are trimmed to the passages most relevant to the
     # claims (see sources.select_passages) instead of being sent whole.
     wcm_max_source_chars: int = 400_000

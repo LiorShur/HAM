@@ -307,6 +307,7 @@ def test_failed_scan_keeps_its_results(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'x.db'}")
     monkeypatch.setattr(judge_mod, "ClaudeJudge", lambda: FakeJudge(None))
+    monkeypatch.setattr("wcm.triage.ClaudeTriage", lambda: None)
     monkeypatch.setattr(worker_mod, "WikipediaClient", NoSuchPage)
     get_settings.cache_clear()
     get_engine.cache_clear()

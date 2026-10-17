@@ -16,6 +16,7 @@ from wcm.judge import ClaudeJudge, Judge
 from wcm.models import AnalysisRun, RunStatus
 from wcm.pipeline import Analyzer
 from wcm.sources import SourceFetcher
+from wcm.triage import Triage
 from wcm.wikipedia import WikipediaClient
 
 log = logging.getLogger(__name__)
@@ -65,17 +66,20 @@ def process(
     wiki: WikipediaClient | None = None,
     fetcher: SourceFetcher | None = None,
     recheck: bool = False,
+    triage: Triage | None = None,
 ) -> None:
+    """Run one analysis. `triage` ranks uncited statements; None skips them."""
     Analyzer(
         session,
         wiki or WikipediaClient(lang=run.lang),
         fetcher or SourceFetcher(),
         judge or ClaudeJudge(),
         recheck=recheck,
+        triage=triage,
     ).run(run)
 
 
-def work_once(judge: Judge | None = None) -> bool:
+def work_once(judge: Judge | None = None, triage: Triage | None = None) -> bool:
     # Claim in its own transaction so the "running" status is visible right away.
     with session_scope() as session:
         run = claim_next(session)
@@ -85,17 +89,19 @@ def work_once(judge: Judge | None = None) -> bool:
     with session_scope() as session:
         run = session.get(AnalysisRun, run_id)
         log.info("Processing run %s (%s)", run.id, run.title or run.requested_rev_id)
-        process(session, run, judge=judge)
+        process(session, run, judge=judge, triage=triage)
         log.info("Run %s finished: %s %s", run.id, run.status, run.stats)
     return True
 
 
-def work_forever(poll_seconds: float = 5.0, judge: Judge | None = None) -> None:
+def work_forever(
+    poll_seconds: float = 5.0, judge: Judge | None = None, triage: Triage | None = None
+) -> None:
     judge = judge or ClaudeJudge()
     log.info("Worker started; polling every %ss for queued runs", poll_seconds)
     while True:
         try:
-            busy = work_once(judge)
+            busy = work_once(judge, triage)
         except Exception:
             # e.g. the database was briefly unavailable; keep the worker alive.
             log.exception("Worker error; retrying in %ss", poll_seconds)

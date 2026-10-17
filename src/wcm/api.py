@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session, selectinload
 
 from wcm.config import get_settings
@@ -81,6 +81,8 @@ class RunOut(BaseModel):
 
 class FindingSummary(BaseModel):
     id: int
+    # "F2": the sources don't support the claim. "uncited": no citation at all.
+    category: str
     severity: str | None
     needs_offline_check: bool
     article: str
@@ -123,8 +125,10 @@ class FindingDetail(FindingSummary):
     permalink: str
     context_before: str
     # "source": judged against its one readable source. "claim": all of the
-    # claim's readable sources were judged together.
+    # claim's readable sources were judged together. "triage": uncited statement.
     assessment: str
+    # For uncited statements: living_person, in_lead, citation_needed_tag.
+    details: dict
     explanation: str
     unsupported_parts: list[str]
     # Each quote has source_number, matching SourceOut.number.
@@ -164,6 +168,7 @@ def _summary(f: Finding) -> dict:
     v = f.verification
     return {
         "id": f.id,
+        "category": f.category,
         "severity": v.severity,
         "needs_offline_check": f.needs_offline_check,
         "article": f.article.title,
@@ -236,12 +241,16 @@ def list_findings(
     session: DB,
     _: Reviewer,
     status: str | None = None,
+    category: str | None = None,
     article_id: int | None = None,
     limit: int = Query(100, le=500),
 ) -> list[FindingSummary]:
-    q = _finding_query().order_by(Finding.id.desc()).limit(limit)
+    rank = case({"high": 0, "medium": 1, "low": 2}, value=Finding.priority, else_=3)
+    q = _finding_query().order_by(rank, Finding.id.desc()).limit(limit)
     if status:
         q = q.where(Finding.status == status)
+    if category:
+        q = q.where(Finding.category == category)
     if article_id:
         q = q.where(Finding.article_id == article_id)
     return [FindingSummary(**_summary(f)) for f in session.scalars(q)]
@@ -287,6 +296,7 @@ def get_finding(finding_id: int, session: DB, _: Reviewer) -> FindingDetail:
         permalink=permalink(f.article.lang, claim.revision.rev_id),
         context_before=claim.context_before,
         assessment=v.kind,
+        details=v.details or {},
         explanation=v.explanation,
         unsupported_parts=v.unsupported_parts,
         quotes=quotes,

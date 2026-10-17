@@ -50,6 +50,7 @@ from wcm.sources import (
     parse_access_date,
     select_passages,
 )
+from wcm.triage import TRIAGE_VERSION, StatementInput, Triage
 from wcm.wikipedia import WikipediaClient
 
 log = logging.getLogger(__name__)
@@ -71,6 +72,35 @@ NEGATIVE = {
 FINDING_VERDICTS = {Verdict.not_supported, Verdict.contradicted, Verdict.partially_supported}
 
 
+# Version 2 also stores uncited sentences (Claim.cited = False).
+PARSER_VERSION = 2
+
+
+def _add_claims(
+    session: Session,
+    revision: Revision,
+    parsed,
+    citations: dict[str, Citation],
+    *,
+    uncited_only: bool = False,
+) -> None:
+    for pc in parsed.claims:
+        if uncited_only and pc.cited:
+            continue
+        claim = Claim(
+            revision=revision,
+            section=pc.section,
+            paragraph_index=pc.paragraph_index,
+            sentence_index=pc.sentence_index,
+            text=pc.text,
+            context_before=pc.context_before,
+            cited=pc.cited,
+            citation_needed_tag=pc.citation_needed,
+        )
+        claim.citations = [citations[n] for n in pc.note_ids if n in citations]
+        session.add(claim)
+
+
 def get_or_create_revision(
     session: Session, wiki: WikipediaClient, title: str | None, rev_id: int | None
 ) -> Revision:
@@ -87,6 +117,13 @@ def get_or_create_revision(
         select(Revision).where(Revision.article_id == article.id, Revision.rev_id == info.rev_id)
     )
     if revision is not None:
+        if revision.parser_version < PARSER_VERSION:
+            # Stored by an older version that kept only cited sentences: add the
+            # uncited ones, leaving existing claims and their results untouched.
+            parsed = parse_article(wiki.revision_html(info.rev_id))
+            _add_claims(session, revision, parsed, {}, uncited_only=True)
+            revision.parser_version = PARSER_VERSION
+            session.flush()
         return revision
 
     html = wiki.revision_html(info.rev_id)
@@ -96,6 +133,7 @@ def get_or_create_revision(
         rev_id=info.rev_id,
         timestamp=info.timestamp,
         html_sha256=hashlib.sha256(html.encode()).hexdigest(),
+        parser_version=PARSER_VERSION,
     )
     session.add(revision)
     session.flush()
@@ -113,17 +151,7 @@ def get_or_create_revision(
         )
         session.add(c)
         citations[note_id] = c
-    for pc in parsed.claims:
-        claim = Claim(
-            revision=revision,
-            section=pc.section,
-            paragraph_index=pc.paragraph_index,
-            sentence_index=pc.sentence_index,
-            text=pc.text,
-            context_before=pc.context_before,
-        )
-        claim.citations = [citations[n] for n in pc.note_ids if n in citations]
-        session.add(claim)
+    _add_claims(session, revision, parsed, citations)
     session.flush()
     return revision
 
@@ -139,6 +167,30 @@ def _priority(v: Verification, needs_offline_check: bool) -> str:
     if v.verdict == Verdict.not_supported or confident:
         return "medium"
     return "low"
+
+
+_LOWER = {"high": "medium", "medium": "low", "low": "low"}
+
+
+def _uncited_priority(
+    category: str, living_person: bool, in_lead: bool, already_tagged: bool
+) -> str | None:
+    """Priority for an uncited statement, or None if it doesn't need a finding.
+
+    The lead may summarise cited body text without repeating citations
+    (WP:LEADCITE), and a {{citation needed}} tag means Wikipedia already flags it,
+    so both lower the priority. Contentious statements about living people stay
+    high everywhere (WP:BLP)."""
+    if category == "general":
+        return None
+    priority = "high" if category == "contentious" else "medium"
+    if category == "contentious" and living_person:
+        return priority
+    if in_lead:
+        priority = _LOWER[priority]
+    if already_tagged:
+        priority = _LOWER[priority]
+    return priority
 
 
 def check_quotes(
@@ -204,8 +256,11 @@ class Analyzer:
         fetcher: SourceFetcher,
         judge: Judge,
         recheck: bool = False,
+        triage: Triage | None = None,
     ):
         self.session = session
+        # None: don't rank uncited statements.
+        self.triage = triage
         # False: skip citations whose claims were all judged before with the current
         # prompt version (saves API cost when re-running the same revision).
         self.recheck = recheck
@@ -470,14 +525,21 @@ class Analyzer:
         final: Verification | None,
         needs_offline: bool,
         stats: Counter,
+        *,
+        category: str = "F2",
+        version: str | None = None,
+        priority: str | None = None,
     ) -> None:
-        """Record the claim's outcome: at most one live finding per claim.
+        """Record the claim's outcome: at most one live finding per claim and category.
 
         Findings a person has confirmed or dismissed are left alone. Undecided
         findings from an older prompt version are marked superseded by this
         assessment."""
+        version = version or PROMPT_VERSION
         existing = self.session.scalars(
-            select(Finding).where(Finding.claim_id == claim.id).order_by(Finding.id)
+            select(Finding)
+            .where(Finding.claim_id == claim.id, Finding.category == category)
+            .order_by(Finding.id)
         ).all()
         if any(f.status in (FindingStatus.confirmed, FindingStatus.dismissed) for f in existing):
             return
@@ -485,7 +547,7 @@ class Analyzer:
         for f in existing:
             if f.status not in UNDECIDED:
                 continue
-            if f.verification.prompt_version != PROMPT_VERSION:
+            if f.verification.prompt_version != version:
                 f.status = FindingStatus.superseded
                 stats["superseded_findings"] += 1
             else:
@@ -497,14 +559,95 @@ class Analyzer:
                 verification=final,
                 article_id=run.revision.article_id,
                 claim_id=claim.id,
-                category="F2",
-                priority=_priority(final, needs_offline),
+                category=category,
+                priority=priority or _priority(final, needs_offline),
                 needs_offline_check=needs_offline,
             )
         )
-        stats["findings"] += 1
-        if needs_offline:
-            stats["needs_offline_check"] += 1
+        if category == "F2":
+            stats["findings"] += 1
+            if needs_offline:
+                stats["needs_offline_check"] += 1
+        else:
+            stats["uncited_findings"] += 1
+
+    # -- stage 3: statements with no citation ----------------------------------------
+
+    def triage_uncited(self, run: AnalysisRun, revision: Revision, stats: Counter) -> None:
+        uncited = [c for c in revision.claims if not c.cited]
+        if not uncited:
+            return
+        done = set()
+        if not self.recheck:
+            done = set(
+                self.session.scalars(
+                    select(Verification.claim_id).where(
+                        Verification.claim_id.in_([c.id for c in uncited]),
+                        Verification.kind == "triage",
+                        Verification.prompt_version == TRIAGE_VERSION,
+                    )
+                )
+            )
+        todo = [c for c in uncited if c.id not in done]
+        if len(todo) < len(uncited):
+            stats["uncited_skipped_already_ranked"] += len(uncited) - len(todo)
+        if not todo:
+            return
+        try:
+            result = self.triage.triage(
+                article_title=revision.article.title,
+                statements=[
+                    StatementInput(c.id, c.text, c.context_before, c.section) for c in todo
+                ],
+            )
+        except JudgeError as exc:
+            stats["judge_errors"] += 1
+            run.error = f"Last triage error: {exc}"
+            log.warning("Ranking uncited statements failed: %s", exc)
+            return
+
+        for claim in todo:
+            t = result.statements[claim.id]
+            in_lead = claim.section == "(lead)"
+            v = Verification(
+                run=run,
+                claim=claim,
+                kind="triage",
+                citation=None,
+                snapshot=None,
+                verdict=Verdict.uncited,
+                severity=t.category,
+                details={
+                    "living_person": t.living_person,
+                    "in_lead": in_lead,
+                    "citation_needed_tag": claim.citation_needed_tag,
+                },
+                explanation=t.reason,
+                unsupported_parts=[],
+                quotes=[],
+                quotes_verified=True,
+                model=result.model,
+                served_model=result.served_model,
+                prompt_version=TRIAGE_VERSION,
+                request_id=result.request_id,
+                usage=result.usage if claim is todo[0] else {},
+            )
+            self.session.add(v)
+            self.session.flush()
+            stats[f"uncited:{t.category}"] += 1
+            priority = _uncited_priority(
+                t.category, t.living_person, in_lead, claim.citation_needed_tag
+            )
+            self._settle(
+                run,
+                claim,
+                v if priority else None,
+                False,
+                stats,
+                category="uncited",
+                version=TRIAGE_VERSION,
+                priority=priority,
+            )
 
     # -- the run ---------------------------------------------------------------------
 
@@ -550,7 +693,8 @@ class Analyzer:
             )
             run.revision = revision
             run.title = revision.article.title
-            stats["claims"] = len(revision.claims)
+            stats["claims"] = sum(1 for c in revision.claims if c.cited)
+            stats["uncited"] = sum(1 for c in revision.claims if not c.cited)
             stats["citations"] = len(revision.citations)
             self._save_progress(run, stats)
 
@@ -566,13 +710,22 @@ class Analyzer:
                     lambda c=citation: self.check_citation(run, c, stats),
                 )
 
-            for claim_id in [c.id for c in revision.claims]:
+            for claim_id in [c.id for c in revision.claims if c.cited]:
                 self._unit(
                     run,
                     stats,
                     f"Claim {claim_id}",
                     lambda cid=claim_id: self.assess_claim(
                         run, self.session.get(Claim, cid), stats
+                    ),
+                )
+            if self.triage is not None:
+                self._unit(
+                    run,
+                    stats,
+                    "Uncited statements",
+                    lambda: self.triage_uncited(
+                        run, self.session.get(Revision, revision.id), stats
                     ),
                 )
             run.status = RunStatus.done

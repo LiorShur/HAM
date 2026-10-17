@@ -9,7 +9,14 @@ const STATUSES = [
   ["superseded", "Superseded"],
 ] as const;
 
+const CATEGORIES = [
+  ["", "All"],
+  ["F2", "Source checks"],
+  ["uncited", "No citation"],
+] as const;
+
 function findingLabel(f: FindingSummary): string {
+  if (f.category === "uncited") return `No citation · ${f.severity ?? ""}`;
   const base = VERDICT_LABEL[f.verdict] ?? f.verdict;
   if (f.needs_offline_check) return `${base} · check offline source`;
   if (f.severity === "minor") return `${base} · minor`;
@@ -27,19 +34,20 @@ const VERDICT_LABEL: Record<string, string> = {
 
 export default function ReviewQueue({ client }: { client: Api }) {
   const [status, setStatus] = useState<string>("open");
+  const [category, setCategory] = useState<string>("");
   const [items, setItems] = useState<FindingSummary[]>([]);
   const [selected, setSelected] = useState<number | null>(null);
   const [error, setError] = useState("");
 
   const load = useCallback(() => {
     client
-      .findings(status)
+      .findings(status, category)
       .then((list) => {
         setItems(list);
         setError("");
       })
       .catch((e) => setError(String(e.message ?? e)));
-  }, [client, status]);
+  }, [client, status, category]);
 
   useEffect(load, [load]);
 
@@ -53,6 +61,20 @@ export default function ReviewQueue({ client }: { client: Api }) {
               className={status === value ? "chip active" : "chip"}
               onClick={() => {
                 setStatus(value);
+                setSelected(null);
+              }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        <div className="filters secondary">
+          {CATEGORIES.map(([value, label]) => (
+            <button
+              key={value || "all"}
+              className={category === value ? "chip active" : "chip"}
+              onClick={() => {
+                setCategory(value);
                 setSelected(null);
               }}
             >
@@ -170,6 +192,37 @@ function SourceRow({ src }: { src: SourceResult }) {
   );
 }
 
+function UncitedPanel({ f }: { f: FindingDetail }) {
+  return (
+    <>
+      <h3>
+        No citation: <span className="verdict v-not_supported">{f.severity}</span>
+      </h3>
+      {f.explanation && <p>Needs a source for: {f.explanation}</p>}
+      {f.details.living_person && (
+        <p className="notice">
+          About a living person. Wikipedia's BLP policy says contentious material about living
+          people that is unsourced should be removed promptly, not just tagged.
+        </p>
+      )}
+      {f.details.in_lead && (
+        <p className="muted small">
+          In the lead section, which may summarise cited text from the body without repeating the
+          citation. Check the body of the article first.
+        </p>
+      )}
+      {f.details.citation_needed_tag && (
+        <p className="muted small">Wikipedia already tags this with [citation needed].</p>
+      )}
+      <p className="muted small">
+        Ranked by {f.served_model ?? f.model} · {f.prompt_version}. The ranking says only how much
+        this needs a source, not whether it is true. Check the article and its history for a source
+        before deciding.
+      </p>
+    </>
+  );
+}
+
 function FindingView({ id, client, onReviewed }: { id: number; client: Api; onReviewed: () => void }) {
   const [f, setF] = useState<FindingDetail | null>(null);
   const [note, setNote] = useState("");
@@ -221,44 +274,50 @@ function FindingView({ id, client, onReviewed }: { id: number; client: Api; onRe
       {f.context_before && <p className="context">{f.context_before}</p>}
       <p className="claim">{f.claim}</p>
 
-      <h3>{f.sources.length === 1 ? "Citation" : `Citations (${f.sources.length})`}</h3>
-      <ol className="sources">
-        {f.sources.map((src) => (
-          <SourceRow key={src.citation_id} src={src} />
-        ))}
-      </ol>
-
-      <h3>
-        Tool's assessment:{" "}
-        <span className={`verdict v-${f.verdict}`}>{VERDICT_LABEL[f.verdict] ?? f.verdict}</span>
-        {f.severity === "minor" && <span className="badge"> minor</span>}
-      </h3>
-      {f.needs_offline_check && (
-        <p className="notice">
-          The sources that could be read don't cover all of this, but it also cites a source
-          that isn't online. Check that source before treating this as a problem.
-        </p>
-      )}
-      <p className="muted small">
-        {f.assessment === "claim" ? "All readable sources judged together. " : ""}
-        Model confidence {f.confidence != null ? Math.round(f.confidence * 100) + "%" : "n/a"} ·{" "}
-        {f.served_model ?? f.model} · {f.prompt_version}. Check the sources yourself; the model can be
-        wrong.
-      </p>
-      <p>{f.explanation}</p>
-      {f.unsupported_parts.length > 0 && (
+      {f.category === "uncited" ? (
+        <UncitedPanel f={f} />
+      ) : (
         <>
-          <p className="small"><strong>Parts not found in the sources:</strong></p>
-          <ul className="parts">
-            {f.unsupported_parts.map((p, i) => (
-              <li key={i}>{p}</li>
+          <h3>{f.sources.length === 1 ? "Citation" : `Citations (${f.sources.length})`}</h3>
+          <ol className="sources">
+            {f.sources.map((src) => (
+              <SourceRow key={src.citation_id} src={src} />
             ))}
-          </ul>
+          </ol>
+
+          <h3>
+            Tool's assessment:{" "}
+            <span className={`verdict v-${f.verdict}`}>{VERDICT_LABEL[f.verdict] ?? f.verdict}</span>
+            {f.severity === "minor" && <span className="badge"> minor</span>}
+          </h3>
+          {f.needs_offline_check && (
+            <p className="notice">
+              The sources that could be read don't cover all of this, but it also cites a source
+              that isn't online. Check that source before treating this as a problem.
+            </p>
+          )}
+          <p className="muted small">
+            {f.assessment === "claim" ? "All readable sources judged together. " : ""}
+            Model confidence {f.confidence != null ? Math.round(f.confidence * 100) + "%" : "n/a"} ·{" "}
+            {f.served_model ?? f.model} · {f.prompt_version}. Check the sources yourself; the model can be
+            wrong.
+          </p>
+          <p>{f.explanation}</p>
+          {f.unsupported_parts.length > 0 && (
+            <>
+              <p className="small"><strong>Parts not found in the sources:</strong></p>
+              <ul className="parts">
+                {f.unsupported_parts.map((p, i) => (
+                  <li key={i}>{p}</li>
+                ))}
+              </ul>
+            </>
+          )}
+          {f.quotes.map((q, i) => (
+            <QuoteBlock key={i} q={q} many={f.sources.length > 1} />
+          ))}
         </>
       )}
-      {f.quotes.map((q, i) => (
-        <QuoteBlock key={i} q={q} many={f.sources.length > 1} />
-      ))}
 
       <h3>Your decision</h3>
       <textarea
@@ -269,13 +328,13 @@ function FindingView({ id, client, onReviewed }: { id: number; client: Api; onRe
       />
       <div className="actions">
         <button disabled={busy} className="primary" onClick={() => decide("confirmed")}>
-          Confirm: not supported by its sources
+          {f.category === "uncited" ? "Confirm: needs a source" : "Confirm: not supported by its sources"}
         </button>
         <button disabled={busy} onClick={() => decide("needs_research")}>
           Needs more research
         </button>
         <button disabled={busy} onClick={() => decide("dismissed")}>
-          Dismiss: tool is wrong
+          {f.category === "uncited" ? "Dismiss: doesn't need one" : "Dismiss: tool is wrong"}
         </button>
       </div>
 
