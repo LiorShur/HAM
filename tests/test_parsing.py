@@ -88,12 +88,17 @@ def test_uncited_statements_are_extracted():
     uncited = {c.text: c for c in claims if not c.cited}
 
     # Covered by the footnote after it: not uncited, kept as context instead.
-    assert [c.text for c in cited] == ["It was granted a charter in 1851."]
+    assert [c.text for c in cited] == [
+        "It was granted a charter in 1851.",
+        "In 2010 the town had 4,200 residents.",
+    ]
     assert cited[0].context_before == "The town was founded by fishermen in 1820."
 
     assert set(uncited) == {
         "Example Town is a small town in Example County on the northern coast.",
+        "Its population was 4,200 in 2010.",
         "About 300 residents were killed in the flood of 1862.",
+        '"The sea gave us everything and took it back," the first harbourmaster wrote.',
         "The former mayor, John Example, was accused of embezzling council funds in 2019.",
         "The town has had a public library since 1902.",
     }

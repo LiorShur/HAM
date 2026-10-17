@@ -122,7 +122,7 @@ def test_uncited_findings_in_api(client, session):
     run_town(session)
     session.commit()
     uncited = client.get("/api/findings?category=uncited", headers=A).json()
-    assert [f["priority"] for f in uncited] == ["high", "high", "low"]  # high first
+    assert [f["priority"] for f in uncited] == ["high", "high", "medium", "low"]  # high first
     assert all(f["category"] == "uncited" for f in uncited)
     assert client.get("/api/findings?category=F2", headers=A).json() == []
 

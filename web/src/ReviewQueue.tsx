@@ -205,6 +205,12 @@ function UncitedPanel({ f }: { f: FindingDetail }) {
           people that is unsourced should be removed promptly, not just tagged.
         </p>
       )}
+      {f.details.covered_by_text && (
+        <p className="notice">
+          The same fact is cited elsewhere in the article: "{f.details.covered_by_text}" Reusing
+          that reference here is probably all that's needed.
+        </p>
+      )}
       {f.details.in_lead && (
         <p className="muted small">
           In the lead section, which may summarise cited text from the body without repeating the

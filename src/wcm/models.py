@@ -211,7 +211,9 @@ class Verification(Base):
     explanation: Mapped[str] = mapped_column(Text, default="")
     # none | minor | major; for kind="triage": contentious | specific | general
     severity: Mapped[str | None] = mapped_column(String(16))
-    # kind="triage": {"living_person": bool, "in_lead": bool, "citation_needed_tag": bool}
+    # kind="triage": {"living_person", "in_lead", "citation_needed_tag": bool,
+    #   "covered_by": claim id of a cited sentence stating the same fact, or None,
+    #   "covered_by_text": that sentence}
     details: Mapped[dict] = mapped_column(JSON, default=dict, server_default="{}")
     unsupported_parts: Mapped[list[str]] = mapped_column(JSON, default=list)
     # [{"kind": "supporting"|"contradicting", "citation_id": int, "text": ...,

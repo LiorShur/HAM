@@ -59,7 +59,13 @@ export type FindingDetail = FindingSummary & {
   permalink: string;
   context_before: string;
   assessment: "source" | "claim" | "triage";
-  details: { living_person?: boolean; in_lead?: boolean; citation_needed_tag?: boolean };
+  details: {
+    living_person?: boolean;
+    in_lead?: boolean;
+    citation_needed_tag?: boolean;
+    covered_by?: number | null;
+    covered_by_text?: string | null;
+  };
   explanation: string;
   unsupported_parts: string[];
   quotes: Quote[];

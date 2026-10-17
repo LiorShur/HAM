@@ -74,6 +74,8 @@ FINDING_VERDICTS = {Verdict.not_supported, Verdict.contradicted, Verdict.partial
 
 # Version 2 also stores uncited sentences (Claim.cited = False).
 PARSER_VERSION = 2
+# Cited sentences offered to the ranking model for "is this fact cited elsewhere?".
+MAX_CITED_FOR_MATCHING = 400
 
 
 def _add_claims(
@@ -172,20 +174,31 @@ def _priority(v: Verification, needs_offline_check: bool) -> str:
 _LOWER = {"high": "medium", "medium": "low", "low": "low"}
 
 
+_PRIORITY = {"contentious": "high", "quotation": "medium", "specific": "low"}
+
+
 def _uncited_priority(
-    category: str, living_person: bool, in_lead: bool, already_tagged: bool
+    category: str,
+    living_person: bool,
+    in_lead: bool,
+    already_tagged: bool,
+    covered_elsewhere: bool = False,
 ) -> str | None:
     """Priority for an uncited statement, or None if it doesn't need a finding.
 
     The lead may summarise cited body text without repeating citations
-    (WP:LEADCITE), and a {{citation needed}} tag means Wikipedia already flags it,
-    so both lower the priority. Contentious statements about living people stay
-    high everywhere (WP:BLP)."""
-    if category == "general":
+    (WP:LEADCITE): a lead sentence whose fact is cited in the body needs nothing,
+    and other lead sentences drop a level. A {{citation needed}} tag means
+    Wikipedia already flags it, so it drops a level too. A body sentence repeating
+    a fact cited elsewhere only needs that reference reused, so it is low.
+    Contentious statements about living people stay high everywhere (WP:BLP)."""
+    if category not in _PRIORITY:
         return None
-    priority = "high" if category == "contentious" else "medium"
     if category == "contentious" and living_person:
-        return priority
+        return "high"
+    if covered_elsewhere:
+        return None if in_lead else "low"
+    priority = _PRIORITY[category]
     if in_lead:
         priority = _LOWER[priority]
     if already_tagged:
@@ -594,11 +607,13 @@ class Analyzer:
         if not todo:
             return
         try:
+            cited = [c for c in revision.claims if c.cited][:MAX_CITED_FOR_MATCHING]
             result = self.triage.triage(
                 article_title=revision.article.title,
                 statements=[
                     StatementInput(c.id, c.text, c.context_before, c.section) for c in todo
                 ],
+                cited_elsewhere=[StatementInput(c.id, c.text, "", c.section) for c in cited],
             )
         except JudgeError as exc:
             stats["judge_errors"] += 1
@@ -606,9 +621,11 @@ class Analyzer:
             log.warning("Ranking uncited statements failed: %s", exc)
             return
 
+        cited_text = {c.id: c.text for c in revision.claims if c.cited}
         for claim in todo:
             t = result.statements[claim.id]
             in_lead = claim.section == "(lead)"
+            covered = t.covered_by if t.covered_by in cited_text else None
             v = Verification(
                 run=run,
                 claim=claim,
@@ -621,6 +638,8 @@ class Analyzer:
                     "living_person": t.living_person,
                     "in_lead": in_lead,
                     "citation_needed_tag": claim.citation_needed_tag,
+                    "covered_by": covered,
+                    "covered_by_text": cited_text.get(covered),
                 },
                 explanation=t.reason,
                 unsupported_parts=[],
@@ -635,8 +654,10 @@ class Analyzer:
             self.session.add(v)
             self.session.flush()
             stats[f"uncited:{t.category}"] += 1
+            if covered:
+                stats["uncited_covered_elsewhere"] += 1
             priority = _uncited_priority(
-                t.category, t.living_person, in_lead, claim.citation_needed_tag
+                t.category, t.living_person, in_lead, claim.citation_needed_tag, bool(covered)
             )
             self._settle(
                 run,

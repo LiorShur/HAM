@@ -118,11 +118,27 @@ class _TownWiki:
 class _Triage:
     """Canned rankings for the demo's uncited statements."""
 
-    def triage(self, *, article_title, statements):
+    def triage(self, *, article_title, statements, cited_elsewhere=()):
         out = {}
         for st in statements:
             t = st.text
-            if "killed" in t:
+            census = next((c.statement_id for c in cited_elsewhere if "4,200" in c.text), None)
+            if "4,200" in t:
+                r = StatementTriage(
+                    statement_id=st.statement_id,
+                    category="specific",
+                    living_person=False,
+                    reason="population figure",
+                    covered_by=census,
+                )
+            elif t.startswith('"'):
+                r = StatementTriage(
+                    statement_id=st.statement_id,
+                    category="quotation",
+                    living_person=False,
+                    reason="quotation",
+                )
+            elif "killed" in t:
                 r = StatementTriage(
                     statement_id=st.statement_id,
                     category="contentious",
@@ -155,7 +171,11 @@ class _TownJudge:
     def judge(self, *, sources, claims):
         return JudgeResult(
             judgements={
-                c.claim_id: _j(c.claim_id, "supported", supporting=["charter in 1851"])
+                c.claim_id: _j(
+                    c.claim_id,
+                    "supported",
+                    supporting=["4,200 residents" if "4,200" in c.text else "charter in 1851"],
+                )
                 for c in claims
             },
             model="demo",
@@ -163,7 +183,10 @@ class _TownJudge:
         )
 
 
-TOWN_PAGES = {"https://town.example/history": "The town received its charter in 1851."}
+TOWN_PAGES = {
+    "https://town.example/history": "The town received its charter in 1851. "
+    "In 2010 the town had 4,200 residents."
+}
 
 
 class _TownFetcher(_Fetcher):

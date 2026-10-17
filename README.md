@@ -54,15 +54,23 @@ found in the source. Findings are marked:
 
 **Statements with no citation.** A sentence counts as uncited when it comes after
 the last footnote in its paragraph, or its paragraph has no footnotes; sentences
-before a footnote are assumed to be covered by it. Claude Haiku 5.5 sorts each one
-into *contentious* (casualty figures, allegations of crimes, responsibility for
-events, named living people, loaded terms in the article's own voice), *specific*
-(other checkable facts) or *general*. It does not judge whether the statement is
-true. Contentious statements are high priority and specific ones medium; general
-ones get no finding. Lead sentences and ones Wikipedia already tags
-{{citation needed}} drop one level, except contentious statements about living
-people (WP:BLP). Ranking a whole article costs about a cent or less. `wcm scan
---skip-uncited` turns this off.
+before a footnote are assumed to be covered by it. Claude Haiku 5.5 sorts each one,
+without judging whether it is true, and also checks whether a cited sentence
+elsewhere in the article states the same fact:
+
+| Kind | Examples | Priority |
+|---|---|---|
+| contentious | casualty figures, allegations of crimes, responsibility for events, named living people, loaded terms in the article's own voice | high |
+| quotation | other direct quotations (Wikipedia requires a citation for each) | medium |
+| specific | figures, dates, measurements, records | low |
+| general | broad or summary statements | no finding |
+
+Lead sentences drop one level, and a lead sentence whose fact is cited in the body
+gets no finding (WP:LEADCITE). A body sentence repeating a fact cited elsewhere is
+low, with a pointer to the reference to reuse. A {{citation needed}} tag drops one
+level. Contentious statements about living people are always high (WP:BLP).
+Ranking a whole article costs about a cent or less. `wcm scan --skip-uncited`
+turns this off.
 
 When the prompt changes (`PROMPT_VERSION` in `wcm/judge.py`), re-running an
 article re-judges it, and any finding nobody has decided on yet is marked

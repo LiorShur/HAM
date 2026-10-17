@@ -64,6 +64,12 @@ def uncited_draft(finding: Finding) -> str:
     ]
     if details.get("citation_needed_tag"):
         lines.append("It is already tagged {{citation needed}}.")
+    if details.get("covered_by_text"):
+        elsewhere = _clip(details["covered_by_text"])
+        lines.append(
+            f'The same fact is cited elsewhere in the article ("{elsewhere}"), '
+            "so that reference could be reused here."
+        )
     lines += [
         "",
         reviewer_note or "[Your own short explanation here.]",
