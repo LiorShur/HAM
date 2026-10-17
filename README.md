@@ -72,6 +72,17 @@ level. Contentious statements about living people are always high (WP:BLP).
 Ranking a whole article costs about a cent or less. `wcm scan --skip-uncited`
 turns this off.
 
+**Checking a whole topic.** The dashboard's **Topics** tab takes a subject and
+lists the Wikipedia articles that belong to it. Candidates come from Wikipedia
+itself: the topic's own article and the articles it links to, Wikipedia's search,
+and the topic's categories one level down. Claude Haiku 5.5 rates how central each
+is (core, closely related, tangential) from its title and short description. Each
+row shows the article's size, edit protection (e.g. extended-confirmed), the last
+check and its open findings, and an estimated cost. Tick the articles you want and
+queue them; `wcm worker` runs the checks. Topic searches are saved, so a topic can
+be re-checked later. Estimates start at about $0.08 per citation and are then
+learned from finished runs; the **Runs** tab shows what each run actually cost.
+
 When the prompt changes (`PROMPT_VERSION` in `wcm/judge.py`), re-running an
 article re-judges it, and any finding nobody has decided on yet is marked
 *superseded* by the new assessment. Confirmed and dismissed findings are kept.

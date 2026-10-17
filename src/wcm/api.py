@@ -1,30 +1,37 @@
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Literal
 
+import httpx
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import case, func, select
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session, object_session, selectinload
 
 from wcm.config import get_settings
+from wcm.costs import cost_per_citation, run_cost
 from wcm.db import session_factory
+from wcm.discovery import RANKING_VERSION, ClaudeRanker, DiscoveryResult, discover
+from wcm.judge import JudgeConfigError, JudgeError
 from wcm.models import (
     AnalysisRun,
     Article,
+    Collection,
+    CollectionArticle,
     Finding,
     FindingStatus,
     Review,
+    RunStatus,
     Verification,
 )
 from wcm.pipeline import latest_source_verdicts
 from wcm.reports import DraftNotAllowed, talk_page_draft
-from wcm.wikipedia import permalink
+from wcm.wikipedia import WikipediaClient, WikipediaError, permalink
 from wcm.worker import enqueue
 
 app = FastAPI(title="Wiki Citation Monitor", version="0.1.0")
@@ -77,6 +84,9 @@ class RunOut(BaseModel):
     requested_by: str | None
     created_at: datetime
     finished_at: datetime | None
+    # What the Claude calls in this run cost, from stored token usage.
+    cost_usd: float
+    collection_id: int | None
 
 
 class FindingSummary(BaseModel):
@@ -149,7 +159,10 @@ class ReviewIn(BaseModel):
 
 
 def _run_out(r: AnalysisRun) -> RunOut:
+    session = object_session(r)
     return RunOut(
+        cost_usd=run_cost(session, r.id) if session else 0.0,
+        collection_id=r.collection_id,
         id=r.id,
         lang=r.lang,
         title=r.title,
@@ -360,6 +373,247 @@ def stats(session: DB, _: Reviewer) -> dict:
             .where(Verification.quotes_verified.is_(False))
         ),
     }
+
+
+# --- Topic collections -------------------------------------------------------------
+
+# Rough size of article text per citation, for estimating cost before an article has
+# been parsed. Refined once there's data; shown to reviewers as an estimate only.
+BYTES_PER_CITATION = 1500
+
+
+def run_discovery(topic: str, lang: str) -> DiscoveryResult:
+    return discover(WikipediaClient(lang=lang), ClaudeRanker(), topic)
+
+
+def get_discovery() -> Callable[[str, str], DiscoveryResult]:
+    return run_discovery
+
+
+Discovery = Annotated[Callable[[str, str], DiscoveryResult], Depends(get_discovery)]
+
+
+class CollectionIn(BaseModel):
+    topic: str = Field(min_length=2, max_length=300)
+    lang: str = Field(default="en", pattern=r"^[a-z\-]{2,12}$")
+
+
+class LastRun(BaseModel):
+    id: int
+    status: str
+    finished_at: datetime | None
+    cost_usd: float
+
+
+class CollectionArticleOut(BaseModel):
+    id: int
+    title: str
+    url: str
+    relevance: int
+    relevance_note: str
+    description: str
+    found_via: str
+    size_bytes: int | None
+    edit_protection: str | None
+    last_edited: datetime | None
+    selected: bool
+    estimated_cost_usd: float
+    last_run: LastRun | None
+    open_findings: int
+    open_uncited: int
+
+
+class CollectionSummary(BaseModel):
+    id: int
+    topic: str
+    lang: str
+    created_by: str | None
+    created_at: datetime
+    article_count: int
+    selected_count: int
+
+
+class CollectionDetail(CollectionSummary):
+    cost_per_citation: float
+    cost_basis_runs: int
+    articles: list[CollectionArticleOut]
+
+
+class ScanIn(BaseModel):
+    titles: list[str] = Field(min_length=1, max_length=200)
+
+
+def _collection_summary(c: Collection) -> dict:
+    return {
+        "id": c.id,
+        "topic": c.topic,
+        "lang": c.lang,
+        "created_by": c.created_by,
+        "created_at": c.created_at,
+        "article_count": len(c.articles),
+        "selected_count": sum(1 for a in c.articles if a.selected),
+    }
+
+
+def _collection_detail(session: Session, c: Collection) -> CollectionDetail:
+    per_citation, basis = cost_per_citation(session)
+    titles = [a.title for a in c.articles]
+    runs: dict[str, AnalysisRun] = {}
+    for r in session.scalars(
+        select(AnalysisRun)
+        .where(AnalysisRun.lang == c.lang, AnalysisRun.title.in_(titles))
+        .order_by(AnalysisRun.id)
+    ):
+        runs[r.title] = r
+    open_counts = Counter()
+    for title, category in session.execute(
+        select(Article.title, Finding.category)
+        .join(Finding, Finding.article_id == Article.id)
+        .where(
+            Article.lang == c.lang,
+            Article.title.in_(titles),
+            Finding.status.in_([FindingStatus.open, FindingStatus.needs_research]),
+        )
+    ):
+        open_counts[(title, category)] += 1
+
+    articles = []
+    for a in c.articles:
+        r = runs.get(a.title)
+        est_citations = max(1, round((a.size_bytes or 0) / BYTES_PER_CITATION))
+        articles.append(
+            CollectionArticleOut(
+                id=a.id,
+                title=a.title,
+                url=f"https://{c.lang}.wikipedia.org/wiki/{a.title.replace(' ', '_')}",
+                relevance=a.relevance,
+                relevance_note=a.relevance_note,
+                description=a.description,
+                found_via=a.found_via,
+                size_bytes=a.size_bytes,
+                edit_protection=a.edit_protection,
+                last_edited=a.last_edited,
+                selected=a.selected,
+                estimated_cost_usd=round(est_citations * per_citation, 2),
+                last_run=LastRun(
+                    id=r.id,
+                    status=r.status,
+                    finished_at=r.finished_at,
+                    cost_usd=run_cost(session, r.id),
+                )
+                if r
+                else None,
+                open_findings=open_counts[(a.title, "F2")],
+                open_uncited=open_counts[(a.title, "uncited")],
+            )
+        )
+    return CollectionDetail(
+        **_collection_summary(c),
+        cost_per_citation=round(per_citation, 4),
+        cost_basis_runs=basis,
+        articles=articles,
+    )
+
+
+@app.post("/api/collections", status_code=201)
+def create_collection(
+    body: CollectionIn, session: DB, reviewer: Reviewer, find: Discovery
+) -> CollectionDetail:
+    """Find the Wikipedia articles for a topic and save them as a collection.
+    Takes up to a minute: it makes several Wikipedia requests and one model call."""
+    try:
+        result = find(body.topic.strip(), body.lang)
+    except JudgeConfigError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except (httpx.HTTPError, WikipediaError) as exc:
+        raise HTTPException(502, f"Wikipedia request failed: {exc}") from exc
+    except JudgeError as exc:
+        raise HTTPException(502, f"Ranking the articles failed: {exc}") from exc
+    c = Collection(
+        topic=body.topic.strip(),
+        lang=body.lang,
+        created_by=reviewer,
+        details={
+            "ranking_model": result.model,
+            "ranking_version": RANKING_VERSION,
+            "ranking_usage": result.usage,
+            "sources": result.sources,
+        },
+    )
+    session.add(c)
+    for rank, cand in enumerate(result.candidates):
+        session.add(
+            CollectionArticle(
+                collection=c,
+                title=cand.title,
+                rank=rank,
+                relevance=cand.relevance,
+                relevance_note=cand.note,
+                description=cand.description,
+                found_via=cand.found_via,
+                size_bytes=cand.size,
+                edit_protection=cand.edit_protection,
+                last_edited=cand.last_edited,
+            )
+        )
+    session.flush()
+    session.refresh(c)
+    return _collection_detail(session, c)
+
+
+@app.get("/api/collections")
+def list_collections(session: DB, _: Reviewer) -> list[CollectionSummary]:
+    rows = session.scalars(
+        select(Collection).options(selectinload(Collection.articles)).order_by(Collection.id.desc())
+    )
+    return [CollectionSummary(**_collection_summary(c)) for c in rows]
+
+
+def _get_collection(session: Session, collection_id: int) -> Collection:
+    c = session.scalar(
+        select(Collection)
+        .options(selectinload(Collection.articles))
+        .where(Collection.id == collection_id)
+    )
+    if c is None:
+        raise HTTPException(404, "Collection not found")
+    return c
+
+
+@app.get("/api/collections/{collection_id}")
+def get_collection(collection_id: int, session: DB, _: Reviewer) -> CollectionDetail:
+    return _collection_detail(session, _get_collection(session, collection_id))
+
+
+@app.post("/api/collections/{collection_id}/scan", status_code=201)
+def scan_collection(collection_id: int, body: ScanIn, session: DB, reviewer: Reviewer) -> dict:
+    """Queue checks for the chosen articles. Articles already queued or running are
+    skipped, so pressing the button twice doesn't pay twice."""
+    c = _get_collection(session, collection_id)
+    by_title = {a.title: a for a in c.articles}
+    unknown = [t for t in body.titles if t not in by_title]
+    if unknown:
+        raise HTTPException(422, f"Not in this collection: {', '.join(unknown[:5])}")
+    busy = set(
+        session.scalars(
+            select(AnalysisRun.title).where(
+                AnalysisRun.lang == c.lang,
+                AnalysisRun.title.in_(body.titles),
+                AnalysisRun.status.in_([RunStatus.queued, RunStatus.running]),
+            )
+        )
+    )
+    queued, skipped = [], []
+    for title in dict.fromkeys(body.titles):
+        by_title[title].selected = True
+        if title in busy:
+            skipped.append(title)
+            continue
+        run = enqueue(session, title, None, c.lang, requested_by=reviewer)
+        run.collection_id = c.id
+        queued.append(run.id)
+    session.flush()
+    return {"queued": len(queued), "run_ids": queued, "already_in_progress": skipped}
 
 
 # --- Static web UI ----------------------------------------------------------------

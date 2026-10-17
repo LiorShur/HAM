@@ -73,6 +73,7 @@ export default function Runs({ client }: { client: Api }) {
               <th>Claims</th>
               <th>Findings</th>
               <th>No citation</th>
+              <th>Cost</th>
               <th>Unavailable sources</th>
               <th>By</th>
             </tr>
@@ -90,6 +91,7 @@ export default function Runs({ client }: { client: Api }) {
                 <td>{r.stats.claims ?? "—"}</td>
                 <td>{r.stats.findings ?? 0}</td>
                 <td>{r.stats.uncited_findings ?? 0}</td>
+                <td>{r.cost_usd ? `$${r.cost_usd.toFixed(2)}` : "—"}</td>
                 <td>{r.stats["verdict:source_unavailable"] ?? 0}</td>
                 <td>{r.requested_by}</td>
               </tr>

@@ -21,7 +21,11 @@
       judging each sentence–source pair separately. Now one assessment per claim,
       sources judged together, offline sources flagged, minor differences marked.
 - [x] Uncited statements: found by position relative to footnotes, ranked by
-      Claude Haiku 5.5 (contentious / specific / general) without judging truth.
+      Claude Haiku 5.5 (contentious / quotation / specific / general) without
+      judging truth.
+- [x] Topics: find a subject's articles (search, categories, links), rank by
+      relevance, choose and queue them as a saved collection; cost estimates and
+      actual cost per run.
 - [ ] Try on real articles once there's network access to Wikipedia, and tune
       the claim extraction (lists, tables, quotes).
 - [ ] Books: page-level lookup through Internet Archive / Google Books where a
@@ -30,6 +34,9 @@
 - [ ] Batch API for bulk runs (half price, not time-sensitive).
 
 ## Phase 2: knowledge base and contradiction checks (F1, F5)
+
+- Start with a spreadsheet the curators fill in and import (template to come):
+  sources, exact passages, facts with status, and figures as separate estimates.
 
 - Tables for sources, passages and claims, where each claim has a status:
   established / majority view / disputed (with the competing positions and who

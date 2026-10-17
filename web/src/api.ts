@@ -10,6 +10,42 @@ export type Run = {
   requested_by: string | null;
   created_at: string;
   finished_at: string | null;
+  cost_usd: number;
+  collection_id: number | null;
+};
+
+export type CollectionSummary = {
+  id: number;
+  topic: string;
+  lang: string;
+  created_by: string | null;
+  created_at: string;
+  article_count: number;
+  selected_count: number;
+};
+
+export type CollectionArticle = {
+  id: number;
+  title: string;
+  url: string;
+  relevance: number;
+  relevance_note: string;
+  description: string;
+  found_via: string;
+  size_bytes: number | null;
+  edit_protection: string | null;
+  last_edited: string | null;
+  selected: boolean;
+  estimated_cost_usd: number;
+  last_run: { id: number; status: Run["status"]; finished_at: string | null; cost_usd: number } | null;
+  open_findings: number;
+  open_uncited: number;
+};
+
+export type CollectionDetail = CollectionSummary & {
+  cost_per_citation: number;
+  cost_basis_runs: number;
+  articles: CollectionArticle[];
 };
 
 export type FindingSummary = {
@@ -151,6 +187,19 @@ export const api = (token: string) => ({
     }),
   talkDraft: (id: number) => request<string>(token, `/api/findings/${id}/talk-draft`),
   stats: () => request<Stats>(token, "/api/stats"),
+  collections: () => request<CollectionSummary[]>(token, "/api/collections"),
+  collection: (id: number) => request<CollectionDetail>(token, `/api/collections/${id}`),
+  createCollection: (topic: string, lang: string) =>
+    request<CollectionDetail>(token, "/api/collections", {
+      method: "POST",
+      body: JSON.stringify({ topic, lang }),
+    }),
+  scanCollection: (id: number, titles: string[]) =>
+    request<{ queued: number; run_ids: number[]; already_in_progress: string[] }>(
+      token,
+      `/api/collections/${id}/scan`,
+      { method: "POST", body: JSON.stringify({ titles }) },
+    ),
 });
 
 export type Api = ReturnType<typeof api>;

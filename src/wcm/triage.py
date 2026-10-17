@@ -140,7 +140,7 @@ class ClaudeTriage:
         result = TriageResult(statements=out, model=self.settings.wcm_triage_model)
         for i in range(0, len(statements), BATCH_SIZE):
             batch = statements[i : i + BATCH_SIZE]
-            response = self._call(article_title, batch, cited_elsewhere)
+            response, request_id = self._call(article_title, batch, cited_elsewhere)
             parsed = response.parsed_output
             wanted = {st.statement_id for st in batch}
             got = {t.statement_id: t for t in parsed.statements if t.statement_id in wanted}
@@ -152,7 +152,7 @@ class ClaudeTriage:
                     t.covered_by = None  # must point at a real cited sentence
             out.update(got)
             result.served_model = response.model
-            result.request_id = getattr(response, "_request_id", None)
+            result.request_id = request_id
             if response.usage:
                 for k, v in response.usage.model_dump(exclude_none=True).items():
                     if isinstance(v, int):
@@ -184,6 +184,7 @@ class ClaudeTriage:
                 output_format=TriageOutput,
             ) as stream:
                 response = stream.get_final_message()
+                request_id = stream.request_id or getattr(response, "id", None)
         except (
             anthropic.AuthenticationError,
             anthropic.PermissionDeniedError,
@@ -203,4 +204,4 @@ class ClaudeTriage:
             raise JudgeError("Output hit max_tokens; raise WCM_TRIAGE_MAX_TOKENS")
         if response.parsed_output is None:
             raise JudgeError("No structured output returned")
-        return response
+        return response, request_id

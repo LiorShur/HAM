@@ -17,6 +17,8 @@ from wcm.judge import (
 
 
 class StubStream:
+    request_id = "req_stub"
+
     def __init__(self, response):
         self.response = response
 

@@ -216,6 +216,7 @@ class ClaudeJudge:
                 fallbacks="default",
             ) as stream:
                 response = stream.get_final_message()
+                request_id = stream.request_id or getattr(response, "id", None)
         except (
             anthropic.AuthenticationError,
             anthropic.PermissionDeniedError,
@@ -248,6 +249,6 @@ class ClaudeJudge:
             judgements=judgements,
             model=model,
             served_model=response.model,
-            request_id=getattr(response, "_request_id", None),
+            request_id=request_id,
             usage=response.usage.model_dump(exclude_none=True) if response.usage else {},
         )

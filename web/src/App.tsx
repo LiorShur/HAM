@@ -2,9 +2,10 @@ import { useEffect, useMemo, useState } from "react";
 import { api, getToken, setToken } from "./api";
 import ReviewQueue from "./ReviewQueue";
 import Runs from "./Runs";
+import Topics from "./Topics";
 import StatsView from "./Stats";
 
-type Tab = "queue" | "runs" | "stats";
+type Tab = "queue" | "topics" | "runs" | "stats";
 
 export default function App() {
   const [token, setTokenState] = useState(getToken());
@@ -56,9 +57,9 @@ export default function App() {
       <header className="topbar">
         <strong>Citation Monitor</strong>
         <nav>
-          {(["queue", "runs", "stats"] as Tab[]).map((t) => (
+          {(["queue", "topics", "runs", "stats"] as Tab[]).map((t) => (
             <button key={t} className={tab === t ? "tab active" : "tab"} onClick={() => setTab(t)}>
-              {{ queue: "Review queue", runs: "Runs", stats: "Stats" }[t]}
+              {{ queue: "Review queue", topics: "Topics", runs: "Runs", stats: "Stats" }[t]}
             </button>
           ))}
         </nav>
@@ -77,6 +78,7 @@ export default function App() {
         </span>
       </header>
       {tab === "queue" && <ReviewQueue client={client} />}
+      {tab === "topics" && <Topics client={client} />}
       {tab === "runs" && <Runs client={client} />}
       {tab === "stats" && <StatsView client={client} />}
     </>

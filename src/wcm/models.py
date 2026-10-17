@@ -186,6 +186,8 @@ class AnalysisRun(Base):
     error: Mapped[str | None] = mapped_column(Text)
     stats: Mapped[dict] = mapped_column(JSON, default=dict)
     requested_by: Mapped[str | None] = mapped_column(String(255))
+    # Set when the run was queued from a topic collection.
+    collection_id: Mapped[int | None] = mapped_column(ForeignKey("collections.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -277,3 +279,46 @@ class Review(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     finding: Mapped[Finding] = relationship(back_populates="reviews")
+
+
+class Collection(Base):
+    """A saved topic search: the Wikipedia articles found for a subject, which of
+    them a reviewer chose to scan, and the runs queued for them."""
+
+    __tablename__ = "collections"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    topic: Mapped[str] = mapped_column(String(512))
+    lang: Mapped[str] = mapped_column(String(16))
+    created_by: Mapped[str | None] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # Which model ranked the candidates, and the discovery settings used.
+    details: Mapped[dict] = mapped_column(JSON, default=dict, server_default="{}")
+
+    articles: Mapped[list["CollectionArticle"]] = relationship(
+        back_populates="collection", order_by="CollectionArticle.rank"
+    )
+
+
+class CollectionArticle(Base):
+    __tablename__ = "collection_articles"
+    __table_args__ = (UniqueConstraint("collection_id", "title"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    collection_id: Mapped[int] = mapped_column(ForeignKey("collections.id"))
+    title: Mapped[str] = mapped_column(String(512))
+    # Order shown to the reviewer: most relevant first.
+    rank: Mapped[int] = mapped_column(Integer)
+    # 3 core to the topic, 2 closely related, 1 tangential, 0 unrelated.
+    relevance: Mapped[int] = mapped_column(Integer)
+    relevance_note: Mapped[str] = mapped_column(Text, default="")
+    description: Mapped[str] = mapped_column(Text, default="")
+    # How it was found: search, category:<name>, linked from <title>.
+    found_via: Mapped[str] = mapped_column(String(512), default="")
+    size_bytes: Mapped[int | None] = mapped_column(Integer)
+    # e.g. "extendedconfirmed": only editors with 500 edits and 30 days can edit.
+    edit_protection: Mapped[str | None] = mapped_column(String(64))
+    last_edited: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    selected: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+
+    collection: Mapped[Collection] = relationship(back_populates="articles")
